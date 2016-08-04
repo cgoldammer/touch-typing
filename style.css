@@ -1,0 +1,12 @@
+body {
+    font-size: 200%;;
+}
+.correct{
+    color: green;
+}
+.incorrect{
+    color: red;
+}
+.to-enter{
+    color: gray;
+]
