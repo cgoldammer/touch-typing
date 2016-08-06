@@ -10,130 +10,126 @@ import Control.Monad
 import Data.Map.Strict as Map
 import Reflex.Dom.Widget.Basic 
 import Data.Char (chr)
+import qualified Data.List as List
 -- import Text.Regex.Base
 
 main :: IO ()
 main = mainWidgetWithCss cssCombined typing
 
-cssBootstrap :: BS.ByteString
-cssBootstrap = $(embedFile "bootstrap.css")
-
-cssStyle :: BS.ByteString
-cssStyle = $(embedFile "style.css")
-
 cssCombined :: BS.ByteString
-cssCombined = BS.concat [cssBootstrap, cssStyle]
+cssCombined = BS.concat [$(embedFile "css/pure-min.css"), $(embedFile "css/style.css")]
 
-baseText :: String
-baseText = "Copy this string"
+texts :: [String]
+texts = [take i $ repeat 'a' | i <- [5..]]
 
 correctPart :: String -> String -> [Bool]
 correctPart target [] = []
 correctPart [] (entered:rest) = False : (correctPart [] rest)
 correctPart (a:as) (b:bs) = (a == b) : (correctPart as bs)
 
-data LetterState = Correct | Incorrect | ToEnter deriving (Eq, Show)
-type CharState = (Char, LetterState)
+data LetterType = Correct | Incorrect | ToEnter deriving (Eq, Show)
+type DisplayLetter = (Char, LetterType)
+type DisplayString = [DisplayLetter]
 
-correctToState :: Bool -> LetterState
-correctToState False = Incorrect
-correctToState True = Correct
+correctToType :: Bool -> LetterType
+correctToType False = Incorrect
+correctToType True = Correct
 
+updateDisplayString :: DisplayString -> Char -> DisplayString
+updateDisplayString ds c 
+  | notCompleted = left ++ [(c, correctToType (currentLetter == c))] ++ right
+  | otherwise = ds
+  where numberEntered = numberLettersEntered ds
+        notCompleted = numberEntered < length ds
+        left = take numberEntered ds
+        right = drop (numberEntered + 1) ds
+        currentLetter = fst (ds !! numberEntered)
 
-letterStates :: String -> String -> [LetterState]
-letterStates target entered = enteredCorrect ++ toEnter
-    where enteredCorrect = fmap correctToState correct
+letterTypes :: String -> String -> [LetterType]
+letterTypes target entered = enteredCorrect ++ toEnter
+    where enteredCorrect = fmap correctToType correct
           toEnter = take (length target - length entered) $ repeat ToEnter
           correct = correctPart target entered
 
-charStates :: String -> String -> [CharState]
-charStates t e = zip e (letterStates t e)
+charStates :: String -> String -> DisplayString
+charStates t e = zip e (letterTypes t e)
 
-stateCss :: LetterState -> String
+stateCss :: LetterType -> String
 stateCss Correct = "correct"
 stateCss Incorrect = "incorrect"
 stateCss ToEnter = "to-enter"
 
-displayState :: MonadWidget t m => CharState -> m ()
+data MainState = MainState
+  { currentTextNumber :: Int
+  , currentText :: String
+  , currentTextState :: DisplayString
+  , completed :: Bool }
+  deriving Show
+
+numberLettersEntered :: DisplayString -> Int
+numberLettersEntered ds = maybe (length ds) id maybePosition
+  where maybePosition = List.findIndex (==ToEnter) dt
+        dt = fmap snd ds
+
+stateUpdater :: Char -> MainState -> MainState
+stateUpdater c (MainState ctn ct cts cp)
+  | numberEntered <= (length ct) - 1 = MainState ctn ct (updateDisplayString cts c) False
+  | otherwise = MainState nextCount nextText (initialDisplayString nextText) False
+  where nextText = texts !! nextCount
+        nextCount = ctn + 1
+        numberEntered = numberLettersEntered cts
+
+initialDisplayString :: String -> DisplayString
+initialDisplayString s = zip s (repeat ToEnter)
+
+startingMainState = MainState 0 newText (initialDisplayString newText) False
+  where newText = texts !! 0
+
+displayState :: MonadWidget t m => DisplayLetter -> m ()
 displayState (ch, ls) = elAttr "span" ("class" =: (stateCss ls)) $ do
   text $ [ch]
   return ()
 
-
-displayStates :: MonadWidget t m => [CharState] -> m ()
+displayStates :: MonadWidget t m => DisplayString -> m ()
 displayStates s = sequence (fmap displayState s) >> return ()
+
+displayMainState :: MonadWidget t m => MainState -> m ()
+displayMainState (MainState ctn ct cts cp) = do
+  el "p" $ do displayStates cts
+  let enteredString = fmap fst cts
+  let eCounter = errCounter enteredString ct
+  displayCounter eCounter
+  return ()
 
 typing :: MonadWidget t m => m ()
 typing = do
   el "h1" $ text "Touch typing"
   (keyListenerDiv, _) <- elAttr' "div" (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) $ text ""
   let stroke = domEvent Keypress keyListenerDiv
-  dynAgg :: Dynamic t String <- foldDyn (\i s -> s ++ [(chr i)]) "" stroke
-  el "p" $ do text baseText
-  dynCharStates :: Dynamic t [CharState] <- mapDyn (charStates baseText) dynAgg
-  dynM :: Dynamic t (m ()) <- mapDyn displayStates dynCharStates
-  dyn dynM
-
-  dynC <- dynCount dynAgg
-  dynC2 <- mapDyn snd dynC
-  dynList <- mapDyn assocs dynC2
-  simpleList dynList countWidget
-  return ()
-
-
-frequency :: (Ord a) => [a] -> [(a, Int)]
-frequency xs = toList (fromListWith (+) [(x, 1) | x <- xs])
-
-countWidget :: MonadWidget t m
-         => Dynamic t (Char, Int)
-         -> m ()
-countWidget tuple = do
-  el "p" $ do
-    str <- mapDyn (\(c, i) -> show c ++ ": " ++ show i) tuple
-    dynText str
-    return ()
-  return ()
-
-dynCount :: MonadWidget t m => Dynamic t String -> m (Dynamic t StateWithCount)
-dynCount textDyn = foldDyn updater initialStateWithCount (updated $ textDyn)
-
-ts :: MonadWidget t m => StateWithCount -> m[()]
-ts (current, state) = mapM textSpan (assocs state)
-
-textSpan :: MonadWidget t m => (Char, Int) -> m ()
-textSpan (letter, count) = elAttr "span" ("class" =: "none") $ do
-  text $ (letter:[]) ++ show count
+  let enteredChar = fmap chr stroke
+  currentState :: Dynamic t MainState <- foldDyn stateUpdater startingMainState enteredChar
+  -- dyn s
+  csm <- mapDyn displayMainState currentState
+  dyn csm
   return ()
 
 type Count = Map.Map Char Int
-type StateWithCount = (String, Count)
 
-differentLetter :: Char -> Char -> Maybe Char
-differentLetter a b
-  | a /= b = Just a
-  | otherwise = Nothing
+displayCounter :: MonadWidget t m => Count -> m ()
+displayCounter counter = do
+  mapM textSpan (assocs counter)
+  return ()
 
-addError :: Maybe Char -> Count -> Count
-addError Nothing d = d
-addError (Just a) d = insertWith (\_ n -> n + 1) a 1 d
+textSpan :: MonadWidget t m => (Char, Int) -> m ()
+textSpan (letter, count) = elAttr "span" ("class" =: "none") $ do
+  el "p" $ do
+    text $ [letter] ++ ": " ++ show count
+  return ()
 
--- Fold over errorCounter to get current state of errors
-errorCounter :: StateWithCount -> String -> String -> StateWithCount
-errorCounter (initial, counter) new correct
-  | newLength > correctLength = (new, counterWithLast)
-  | newLength == (length initial) + 1 = (new, counterWithDifferent)
-  | otherwise = (new, counter)
-  where newLength = (length new)
-        atNewLength s = s !! (newLength-1)
-        newLetter = atNewLength new
-        correctLetter = atNewLength correct
-        correctLength = length correct
-        counterWithLast = addError (Just newLetter) counter
-        counterWithDifferent = addError (differentLetter correctLetter newLetter) counter
+ec :: Count -> String -> String -> Count
+ec ct (eChar:eRest) (cChar:cRest)
+  | eChar == cChar = ec ct eRest cRest
+  | eChar /= cChar = ec (insertWith (+) eChar 1 ct) eRest cRest
+ec ct s1 s2 = ct
 
-initialStateWithCount :: StateWithCount
-initialStateWithCount = ("", fromList [])
-
-updater :: String -> StateWithCount -> StateWithCount
-updater str s = errorCounter s str baseText
-
+errCounter = ec Map.empty
