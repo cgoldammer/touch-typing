@@ -12,6 +12,7 @@ import Data.Char (chr)
 import qualified Data.List as List
 import qualified GHCJS.DOM.Element as Element
 import qualified Control.Monad.IO.Class as IOClass
+import Data.Time.Clock
 
 main :: IO ()
 main = mainWidgetWithCss cssCombined typing
@@ -101,17 +102,16 @@ displayStates s = sequence (fmap displayState s) >> return ()
 displayMainState :: MonadWidget t m => MainState -> m ()
 displayMainState (MainState ctn ct cts cp) = do
   el "p" $ do displayStates cts
-  let enteredString = fmap fst cts
-  let eCounter = errCounter enteredString ct
-  displayCounter eCounter
   return ()
 
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
 
 nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
-nextButtons (MainState _ _ _ True) = el "div" $ do
+nextButtons (MainState ctn ct cts True) = el "div" $ do
   next <- button "next"
   repeat <- button "repeat"
+  silly <- button "silly"
+  displayCounter $ errCounter (fmap fst cts) ct
   return $ leftmost [fmap (const Next) next, fmap (const Repeat) repeat]
 nextButtons _ = do
   blank
@@ -120,25 +120,97 @@ nextButtons _ = do
 performArg :: MonadWidget t m => (b -> IO a) -> Event t b -> m (Event t a)
 performArg f x = performEvent (fmap (IOClass.liftIO . f) x)
 
+
 typing :: MonadWidget t m => m ()
 typing = do
   el "h1" $ text "Touch typing"
-  (keyListenerDiv, _) <- elAttr' "div" hiddenDivAttr $ do text ""
+  (keyListenerDiv, _) <- elAttr' "div" hiddenDivAttr $ do text "hidden div"
 
   schedulePostBuild $ IOClass.liftIO $ Element.focus $ _el_element keyListenerDiv
   let charEvent = fmap chr $ domEvent Keypress keyListenerDiv 
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
 
   rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer]
+      all :: Dynamic t (m ()) <- mapDyn displayMainState currentState
+      dyn all
       nextB <- mapDyn nextButtons currentState
       nextEv :: Event t (Event t NextEvent) <- dyn nextB
       nextSimple :: Behavior t (Event t NextEvent) <- hold never nextEv
       let nextTransformer = fmap (flip updateMainStateWithNext) (switch nextSimple)
-      all :: Dynamic t (m ()) <- mapDyn displayMainState currentState
-      dyn all
+
+      let event = leftmost [fmap (const NewEntered) nextTransformer, fmap (const CharEntered) charTransformer] -- Event t EventType
+      dIsFirst :: Dynamic t (Bool, Bool) <- foldDyn isFirstChar (True, False) event
+
+      let eIsFirst = ffilter hasStarted (updated dIsFirst)
+
+      let eHasCompleted = attachDynWith hasCompleted currentState charEvent
+      let eHasStarted = fmap fst $ ffilter fst (updated dIsFirst)
+
+      levelEndGate :: Behavior t Bool <- hold False eHasCompleted
+      let dynNew2 = dynNew levelEndGate eHasStarted
+
+      dNew :: Dynamic t (m ()) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
+      dyn dNew
+
   void $ performArg (const $ Element.focus (_el_element keyListenerDiv)) $ nextTransformer
 
   return ()
+
+dynNew :: MonadWidget t m => Behavior t Bool -> Event t Bool -> m ()
+dynNew e hasStarted = do
+  curTime <- IOClass.liftIO getCurrentTime
+  tl :: Dynamic t TickInfo <- clockLossy aSecond curTime
+  let tlTime = fmap (show . _tickInfo_n) (updated tl) -- Event t String
+  let tlTimeGated = gate e tlTime -- Event t String
+  let tlTime2 = leftmost [fmap (const "0") hasStarted, tlTimeGated]
+  clock <- holdDyn "0" tlTime2
+  el "p" $ do
+    text "Time elapsed: "
+    dynText clock
+  return ()
+
+hasCompleted :: MainState -> a -> Bool
+hasCompleted ms _ = not $ completed ms
+
+hasStarted :: (Bool, Bool) -> Bool
+hasStarted (_, True) = True
+hasStarted _ = False
+
+data TypeEvent = NewEntered | CharEntered
+
+isFirstChar :: TypeEvent -> (Bool, Bool) -> (Bool, Bool)
+isFirstChar CharEntered (True, _) = (False, True)
+isFirstChar NewEntered (_, _) = (True, False)
+isFirstChar CharEntered (_, _) = (False, False)
+
+newLevel :: MonadWidget t m => Event t a -> m ()
+newLevel e = do
+  curTime <- IOClass.liftIO getCurrentTime
+  tl :: Event t TickInfo <- tickLossyFrom aSecond curTime e
+  let tlTime = fmap (show . _tickInfo_n) tl -- Event t String
+  clock <- holdDyn "0" tlTime
+  dynText clock
+  return ()
+
+
+
+data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int}
+ 
+levelSummary :: Count -> String -> LevelSummary
+levelSummary errors target = LevelSummary numberLetters numberCorrect
+  where numberLetters = length target
+        numberErrors =  Map.foldr (+) 0 errors
+        numberCorrect = numberLetters - numberErrors
+
+
+displayLevelSummary :: MonadWidget t m => LevelSummary -> m ()
+displayLevelSummary ls = el "div" $ do
+  el "p" $ text $ show (numberCorrect ls)
+  el "p" $ text $ show (numberLetters ls)
+  return ()
+
+aSecond :: NominalDiffTime
+aSecond = 0.1
 
 type Count = Map.Map Char Int
 
@@ -160,4 +232,5 @@ ec ct (eChar:eRest) (cChar:cRest)
 ec ct s1 s2 = ct
 
 errCounter = ec Map.empty
+
 
