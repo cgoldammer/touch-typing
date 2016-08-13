@@ -66,7 +66,8 @@ data MainState = MainState
   { currentTextNumber :: Int
   , currentText :: String
   , currentTextState :: DisplayString
-  , completed :: Bool }
+  , completed :: Bool 
+  , timeElapsed :: String}
   deriving Show
 
 numberLettersEntered :: DisplayString -> Int
@@ -75,20 +76,22 @@ numberLettersEntered ds = maybe (length ds) id maybePosition
         dt = fmap snd ds
 
 updateMainStateWithChar :: MainState -> Char -> MainState
-updateMainStateWithChar (MainState ctn ct cts cp) c = MainState ctn ct (updateDisplayString cts c) completed
+updateMainStateWithChar (MainState ctn ct cts cp t) c = MainState ctn ct (updateDisplayString cts c) completed t
   where numberEntered = numberLettersEntered cts
         completed = numberEntered >= (length ct) - 1
 
 updateMainStateWithNext :: MainState -> NextEvent -> MainState
-updateMainStateWithNext (MainState ctn ct cts cp) Next = MainState nextCount nextText (initialDisplayString nextText) False
+updateMainStateWithNext (MainState ctn ct cts cp t) Next = MainState nextCount nextText (initialDisplayString nextText) False t
   where nextCount = ctn + 1
         nextText = texts !! nextCount
-updateMainStateWithNext (MainState ctn ct cts cp) Repeat = MainState ctn ct (initialDisplayString ct) False
+updateMainStateWithNext (MainState ctn ct cts cp t) Repeat = MainState ctn ct (initialDisplayString ct) False t
+
+updateMainStateWithClock (MainState ctn ct cts cp t) t2 = MainState ctn ct cts cp t2
 
 initialDisplayString :: String -> DisplayString
 initialDisplayString s = zip s (repeat ToEnter)
 
-startingMainState = MainState 0 newText (initialDisplayString newText) False
+startingMainState = MainState 0 newText (initialDisplayString newText) False "0"
   where newText = texts !! 0
 
 displayState :: MonadWidget t m => DisplayLetter -> m ()
@@ -100,14 +103,14 @@ displayStates :: MonadWidget t m => DisplayString -> m ()
 displayStates s = sequence (fmap displayState s) >> return ()
 
 displayMainState :: MonadWidget t m => MainState -> m ()
-displayMainState (MainState ctn ct cts cp) = do
+displayMainState (MainState ctn ct cts cp t) = do
   el "p" $ do displayStates cts
   return ()
 
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
 
 nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
-nextButtons (MainState ctn ct cts True) = el "div" $ do
+nextButtons (MainState ctn ct cts True _) = el "div" $ do
   next <- button "next"
   repeat <- button "repeat"
   silly <- button "silly"
@@ -130,7 +133,7 @@ typing = do
   let charEvent = fmap chr $ domEvent Keypress keyListenerDiv 
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
 
-  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer]
+  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
       all :: Dynamic t (m ()) <- mapDyn displayMainState currentState
       dyn all
       nextB <- mapDyn nextButtons currentState
@@ -149,25 +152,34 @@ typing = do
       levelEndGate :: Behavior t Bool <- hold False eHasCompleted
       let dynNew2 = dynNew levelEndGate eHasStarted
 
-      dNew :: Dynamic t (m ()) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
-      dyn dNew
+      dNew :: Dynamic t (m (Dynamic t String)) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
+      clockTime :: Event t (Dynamic t String) <- dyn dNew
+      dyndyn :: Dynamic t (Dynamic t String) <- holdDyn (constDyn "0") clockTime
+      let clockDyn = joinDyn dyndyn
+
+      let clockTransformer = fmap (flip updateMainStateWithClock) (updated clockDyn) -- Event t (MainState -> MainState)
+
+      stateAsText :: Dynamic t String <- mapDyn show currentState
+      dynText stateAsText
+
 
   void $ performArg (const $ Element.focus (_el_element keyListenerDiv)) $ nextTransformer
 
   return ()
 
-dynNew :: MonadWidget t m => Behavior t Bool -> Event t Bool -> m ()
+dynNew :: MonadWidget t m => Behavior t Bool -> Event t Bool -> m (Dynamic t String)
 dynNew e hasStarted = do
   curTime <- IOClass.liftIO getCurrentTime
   tl :: Dynamic t TickInfo <- clockLossy aSecond curTime
   let tlTime = fmap (show . _tickInfo_n) (updated tl) -- Event t String
   let tlTimeGated = gate e tlTime -- Event t String
   let tlTime2 = leftmost [fmap (const "0") hasStarted, tlTimeGated]
-  clock <- holdDyn "0" tlTime2
+  clock :: Dynamic t String <- holdDyn "0" tlTime2
   el "p" $ do
     text "Time elapsed: "
     dynText clock
-  return ()
+  return clock
+
 
 hasCompleted :: MainState -> a -> Bool
 hasCompleted ms _ = not $ completed ms
@@ -193,7 +205,6 @@ newLevel e = do
   return ()
 
 
-
 data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int}
  
 levelSummary :: Count -> String -> LevelSummary
@@ -205,8 +216,8 @@ levelSummary errors target = LevelSummary numberLetters numberCorrect
 
 displayLevelSummary :: MonadWidget t m => LevelSummary -> m ()
 displayLevelSummary ls = el "div" $ do
-  el "p" $ text $ show (numberCorrect ls)
-  el "p" $ text $ show (numberLetters ls)
+  el "p" $ text $ "Number correct" ++ (show (numberCorrect ls))
+  el "p" $ text $ "Number letters" ++ (show (numberLetters ls))
   return ()
 
 aSecond :: NominalDiffTime
