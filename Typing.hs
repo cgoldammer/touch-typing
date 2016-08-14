@@ -113,7 +113,6 @@ nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
 nextButtons (MainState ctn ct cts True _) = el "div" $ do
   next <- button "next"
   repeat <- button "repeat"
-  silly <- button "silly"
   displayCounter $ errCounter (fmap fst cts) ct
   return $ leftmost [fmap (const Next) next, fmap (const Repeat) repeat]
 nextButtons _ = do
@@ -162,10 +161,11 @@ typing = do
       stateAsText :: Dynamic t String <- mapDyn show currentState
       dynText stateAsText
 
-
+      -- Upon complete level, push LevelSummary to db
+      -- liftIO submitLevelSummary $ levelSummary 
   void $ performArg (const $ Element.focus (_el_element keyListenerDiv)) $ nextTransformer
-
   return ()
+
 
 dynNew :: MonadWidget t m => Behavior t Bool -> Event t Bool -> m (Dynamic t String)
 dynNew e hasStarted = do
@@ -205,14 +205,13 @@ newLevel e = do
   return ()
 
 
-data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int}
+data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int, levelTime :: Float}
  
-levelSummary :: Count -> String -> LevelSummary
-levelSummary errors target = LevelSummary numberLetters numberCorrect
-  where numberLetters = length target
-        numberErrors =  Map.foldr (+) 0 errors
-        numberCorrect = numberLetters - numberErrors
-
+levelSummary :: MainState -> LevelSummary
+levelSummary ms = LevelSummary numberLetters numberCorrect t
+  where numberLetters = length (currentText ms)
+        numberCorrect = length $ List.filter (==Correct) $ fmap snd (currentTextState ms)
+        t = read (timeElapsed ms) :: Float
 
 displayLevelSummary :: MonadWidget t m => LevelSummary -> m ()
 displayLevelSummary ls = el "div" $ do
@@ -243,5 +242,3 @@ ec ct (eChar:eRest) (cChar:cRest)
 ec ct s1 s2 = ct
 
 errCounter = ec Map.empty
-
-
