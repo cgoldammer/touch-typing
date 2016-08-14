@@ -100,16 +100,12 @@ p {
     }
 
 
-/*
- * -- PRICING TABLE PRICE --
- * Styles for the price and the corresponding <span>per month</span>
- */
-.typing-table-price {
+.typing-table-type {
     font-size: 6em;
     margin: 0.2em 0 0;
     font-weight: 100;
 }
-    .typing-table-price span {
+    .typing-table-type span {
         display: block;
         text-transform: uppercase;
         font-size: 0.2em;
@@ -150,3 +146,14 @@ p {
         font-size: 3em;
     }
 }
+
+
+.correct{
+    color: green;
+}
+.incorrect{
+    color: red;
+}
+.to-enter{
+    color: gray;
+]

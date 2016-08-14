@@ -19,7 +19,7 @@ import System.IO.Unsafe
 main :: IO ()
 main = mainWidgetWithCss cssCombined typing
 
-cssCombined = BS.concat [$(embedFile "css/pure-min.css"), $(embedFile "css/grids-responsive-min.css"), $(embedFile "css/pricing.css"), $(embedFile "css/style.css")]
+cssCombined = BS.concat [$(embedFile "css/pure-min.css"), $(embedFile "css/grids-responsive-min.css"), $(embedFile "css/typing.css")]
 
 texts :: [String]
 texts = [take 10 $ randomRs ('a', 'z') $ unsafePerformIO newStdGen | i <- [0..]]
@@ -241,15 +241,15 @@ displayLevelSummary ls = elClass "div" "l-content" $ do
     elClass "div" "pure-u-1 pure-u-md-1-3" $ do 
       elClass "div" "typing-table-header" $ do
         el "h2" $ text "Time"
-        elClass "span" "typing-table-price" $ do text $ (show (levelTime ls)) ++ "s"
+        elClass "span" "typing-table-type" $ do text $ (show (levelTime ls)) ++ "s"
     elClass "div" "pure-u-1 pure-u-md-1-3" $ do 
       elClass "div" "typing-table-header" $ do
         el "h2" $ text "Letters"
-        elClass "span" "typing-table-price" $ do text $ show (numberLetters ls)
+        elClass "span" "typing-table-type" $ do text $ show (numberLetters ls)
     elClass "div" "pure-u-1 pure-u-md-1-3" $ do 
       elClass "div" "typing-table-header" $ do
         el "h2" $ text "Correct"
-        elClass "span" "typing-table-price" $ do text $ show (numberCorrect ls)
+        elClass "span" "typing-table-type" $ do text $ show (numberCorrect ls)
     
   return ()
 
