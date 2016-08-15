@@ -101,13 +101,13 @@ displayState (ch, ls) = elAttr "span" ("class" =: (stateCss ls)) $ do
   text $ [ch]
   return ()
 
-displayStates :: MonadWidget t m => DisplayString -> m ()
-displayStates s = sequence (fmap displayState s) >> return ()
+displayStates :: MonadWidget t m => String -> DisplayString -> m ()
+displayStates correct entered = sequence (fmap displayState (zip correct (fmap snd entered))) >> return ()
 
 displayMainState :: MonadWidget t m => MainState -> m ()
 displayMainState (MainState ctn ct cts cp t) = do
   elClass "div" "banner" $ do
-    elClass "h1" "banner-head" $ do displayStates cts
+    elClass "h1" "banner-head" $ do displayStates ct cts
   return ()
 
 
@@ -141,6 +141,7 @@ charToNext '\r' = Repeat
 typing :: MonadWidget t m => m ()
 typing = do
   (keyListenerDiv, _) <- elAttr' "div" hiddenDivAttr $ do text ""
+
 
   schedulePostBuild $ IOClass.liftIO $ Element.focus $ _el_element keyListenerDiv
   let allCharEvent = fmap chr $ domEvent Keypress keyListenerDiv -- Event t Char
@@ -179,6 +180,8 @@ typing = do
 
       nextB <- mapDyn nextButtons currentState
       nextEv :: Event t (Event t NextEvent) <- dyn nextB
+
+      
 
       -- stateAsText :: Dynamic t String <- mapDyn show currentState
       -- dynText stateAsText
