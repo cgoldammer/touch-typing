@@ -1,4 +1,5 @@
-{-# LANGUAGE AllowAmbiguousTypes, RecursiveDo, ScopedTypeVariables, FlexibleContexts, TypeFamilies, ConstraintKinds, TemplateHaskell #-}
+{-# LANGUAGE AllowAmbiguousTypes, RecursiveDo, ScopedTypeVariables, FlexibleContexts, TypeFamilies, GADTs, ConstraintKinds, TemplateHaskell, OverloadedStrings, FlexibleInstances, ExtendedDefaultRules #-}
+
 
 import Prelude hiding (mapM, mapM_, all, sequence)
 import Data.FileEmbed
@@ -15,6 +16,10 @@ import qualified Control.Monad.IO.Class as IOClass
 import Data.Time.Clock
 import System.Random
 import System.IO.Unsafe
+import qualified Data.Text as T
+import Data.Maybe
+
+default (T.Text)
 
 main :: IO ()
 main = mainWidgetWithCss cssCombined typing
@@ -22,7 +27,7 @@ main = mainWidgetWithCss cssCombined typing
 cssCombined = BS.concat [$(embedFile "css/pure-min.css"), $(embedFile "css/grids-responsive-min.css"), $(embedFile "css/typing.css")]
 
 texts :: [String]
-texts = [take 10 $ randomRs ('a', 'z') $ unsafePerformIO newStdGen | i <- [0..]]
+texts = [take 10 $ randomRs ('a', 'z') $ unsafePerformIO newStdGen | i <- [0..]::[Int]]
 
 correctPart :: String -> String -> [Bool]
 correctPart target [] = []
@@ -57,7 +62,7 @@ letterTypes target entered = enteredCorrect ++ toEnter
 charStates :: String -> String -> DisplayString
 charStates t e = zip e (letterTypes t e)
 
-stateCss :: LetterType -> String
+stateCss :: LetterType -> T.Text
 stateCss Correct = "correct"
 stateCss Incorrect = "incorrect"
 stateCss ToEnter = "to-enter"
@@ -69,7 +74,8 @@ data MainState = MainState
   , currentText :: String
   , currentTextState :: DisplayString
   , completed :: Bool 
-  , timeElapsed :: Integer}
+  , timeElapsed :: Integer
+  , userId :: Maybe T.Text}
   deriving Show
 
 numberLettersEntered :: DisplayString -> Int
@@ -77,35 +83,37 @@ numberLettersEntered ds = maybe (length ds) id maybePosition
   where maybePosition = List.findIndex (==ToEnter) dt
         dt = fmap snd ds
 
+updateMainStateWithUser (MainState ctn ct cts cp t i) i' = MainState ctn ct cts cp t i'
+
 updateMainStateWithChar :: MainState -> Char -> MainState
-updateMainStateWithChar (MainState ctn ct cts cp t) c = MainState ctn ct (updateDisplayString cts c) completed t
+updateMainStateWithChar (MainState ctn ct cts cp t i) c = MainState ctn ct (updateDisplayString cts c) completed t i
   where numberEntered = numberLettersEntered cts
         completed = numberEntered >= (length ct) - 1
 
 updateMainStateWithNext :: MainState -> NextEvent -> MainState
-updateMainStateWithNext (MainState ctn ct cts cp t) Next = MainState nextCount nextText (initialDisplayString nextText) False t
+updateMainStateWithNext (MainState ctn ct cts cp t i) Next = MainState nextCount nextText (initialDisplayString nextText) False t i
   where nextCount = ctn + 1
         nextText = texts !! nextCount
-updateMainStateWithNext (MainState ctn ct cts cp t) Repeat = MainState ctn ct (initialDisplayString ct) False t
+updateMainStateWithNext (MainState ctn ct cts cp t i) Repeat = MainState ctn ct (initialDisplayString ct) False t i
 
-updateMainStateWithClock (MainState ctn ct cts cp t) t2 = MainState ctn ct cts cp t2
+updateMainStateWithClock (MainState ctn ct cts cp t i) t2 = MainState ctn ct cts cp t2 i
 
 initialDisplayString :: String -> DisplayString
 initialDisplayString s = zip s (repeat ToEnter)
 
-startingMainState = MainState 0 newText (initialDisplayString newText) False 0
+startingMainState = MainState 0 newText (initialDisplayString newText) False 0 Nothing
   where newText = texts !! 0
 
 displayState :: MonadWidget t m => DisplayLetter -> m ()
-displayState (ch, ls) = elAttr "span" ("class" =: (stateCss ls)) $ do
-  text $ [ch]
+displayState (ch, ls) = elAttr (T.pack "span") ((T.pack "class") =: (stateCss ls)) $ do
+  text $ T.pack [ch]
   return ()
 
 displayStates :: MonadWidget t m => String -> DisplayString -> m ()
 displayStates correct entered = sequence (fmap displayState (zip correct (fmap snd entered))) >> return ()
 
 displayMainState :: MonadWidget t m => MainState -> m ()
-displayMainState (MainState ctn ct cts cp t) = do
+displayMainState (MainState ctn ct cts cp t i) = do
   elClass "div" "banner" $ do
     elClass "h1" "banner-head" $ do displayStates ct cts
   return ()
@@ -115,7 +123,7 @@ displayMainState (MainState ctn ct cts cp t) = do
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
 
 nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
-nextButtons (MainState ctn ct cts True _) = elClass "div" "l-content" $ do
+nextButtons (MainState ctn ct cts True _ i) = elClass "div" "l-content" $ do
   (n, r) <- elClass "div" "next-tables pure-g" $ do
     next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
       (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "next"
@@ -138,17 +146,83 @@ charToNext ' ' = Next
 charToNext '\r' = Repeat
 
 
+type X = XhrRequest T.Text
+
+getReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCredentials = True}
+logoutReq = xhrRequest "GET" "/snap/logout" def {_xhrRequestConfig_withCredentials = True}
+
+getBody :: XhrResponse -> T.Text
+getBody x = maybe (T.pack "") id (_xhrResponse_responseText x)
+
+
+addInfo :: (T.Text, T.Text) -> T.Text
+addInfo (a, b) = T.pack $ "login=" ++ (T.unpack a) ++ "&password=" ++ (T.unpack b)
+
+-- display  n
+-- header :: MainState -> MonadWidget t m => m ()
+-- if not logged in, show newUser and login buttons
+-- if logged in, show logout button
+loginForm :: forall t m. MonadWidget t m => m (Event t X)
+loginForm = el "div" $ do
+
+    name <- textInput def
+    password <- textInput def
+    b <- button "log in"
+    let bothDyns = zipDynWith (,) (_textInput_value name) (_textInput_value password)
+    let reqString = fmap addInfo bothDyns
+    return $ tagPromptlyDyn (fmap (postForm "/snap/login") reqString) b
+
+
+postData :: String -> T.Text -> T.Text -> XhrRequest T.Text
+postData contentType  url text =
+    XhrRequest "POST" url $ def { _xhrRequestConfig_headers = (T.pack "Content-type") =: (T.pack contentType)
+                                , _xhrRequestConfig_sendData = text} 
+
+postForm :: T.Text -> T.Text -> XhrRequest T.Text
+postForm = postData "application/x-www-form-urlencoded"
+
+toHint a = fromList [((T.pack "class"), T.pack ("hint " ++ a))]
+
+userCleaner :: T.Text -> Maybe T.Text
+userCleaner x
+  | x == T.pack "" = Nothing
+  | otherwise = Just x
+
+connect :: MonadWidget t m => Bool -> m (Event t (Maybe T.Text))
+connect False = el "div" $ do
+    postReqEvent :: Event t X <- loginForm
+    e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack postReqEvent)
+    let getReqEvent = fmap (const getReq) e
+    getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
+    getText :: Dynamic t T.Text <- holdDyn (T.pack "not sent off yet") $ fmap getBody getResponse
+    dynText getText
+    return $ updated $ fmap userCleaner getText
+connect True = do
+    logout <- button "log out"
+    return $ fmap (const Nothing) logout
+
+
 typing :: MonadWidget t m => m ()
 typing = do
-  (keyListenerDiv, _) <- elAttr' "div" hiddenDivAttr $ do text ""
-
-
+  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text ""
+  
   schedulePostBuild $ IOClass.liftIO $ Element.focus $ _el_element keyListenerDiv
   let allCharEvent = fmap chr $ domEvent Keypress keyListenerDiv -- Event t Char
   let charEvent = ffilter ((flip elem) ['a'..'z']) allCharEvent
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
 
-  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
+  divClass <- holdDyn "half" (fmap (const "nothing") charEvent)
+  dynAtt <- mapDyn toHint divClass
+  elDynAttr (T.pack "p") dynAtt $ text $ T.pack "Just type..."
+
+  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer, userTransformer]
+      let loggedInState = fmap (isJust . userId) currentState -- Dynamic t Bool
+      loginWidget :: Dynamic t (m (Event t (Maybe T.Text))) <- mapDyn connect loggedInState 
+      w :: Event t (Event t (Maybe T.Text)) <- dyn loginWidget
+      w2 :: Behavior t (Event t (Maybe T.Text)) <- hold never w
+      let currentUserEvent = switch w2 -- Event t (Maybe T.Text)
+      let userTransformer = fmap (flip updateMainStateWithUser) currentUserEvent
+
       all :: Dynamic t (m ()) <- mapDyn displayMainState currentState
       dyn all
       nextSimple :: Behavior t (Event t NextEvent) <- hold never nextEv
@@ -181,10 +255,8 @@ typing = do
       nextB <- mapDyn nextButtons currentState
       nextEv :: Event t (Event t NextEvent) <- dyn nextB
 
-      
-
-      -- stateAsText :: Dynamic t String <- mapDyn show currentState
-      -- dynText stateAsText
+      stateAsText :: Dynamic t T.Text <- mapDyn (T.pack . show) currentState
+      dynText stateAsText
 
       -- Upon complete level, push LevelSummary to db
       -- liftIO submitLevelSummary $ levelSummary 
@@ -225,8 +297,8 @@ newLevel e = do
   curTime <- IOClass.liftIO getCurrentTime
   tl :: Event t TickInfo <- tickLossyFrom aSecond curTime e
   let tlTime = fmap (show . _tickInfo_n) tl -- Event t String
-  clock <- holdDyn "0" tlTime
-  dynText clock
+  clock :: Dynamic t String <- holdDyn "0" tlTime
+  dynText (fmap T.pack clock)
   return ()
 
 
@@ -238,22 +310,19 @@ levelSummary ms = LevelSummary numberLetters numberCorrect t
         numberCorrect = length $ List.filter (==Correct) $ fmap snd (currentTextState ms)
         t = timeElapsed ms
 
+
+column :: MonadWidget t m => String -> String -> m ()
+column name value = elClass (T.pack "div") (T.pack "pure-u-1 pure-u-md-1-3") $ do 
+      elClass (T.pack "div") (T.pack "typing-table-header") $ do
+        el (T.pack "h2") $ text (T.pack name)
+        elClass (T.pack "span") (T.pack "typing-table-type") $ do text (T.pack value)
+
 displayLevelSummary :: MonadWidget t m => LevelSummary -> m ()
-displayLevelSummary ls = elClass "div" "l-content" $ do
-  elClass "div" "typing-tables pure-g" $ do
-    elClass "div" "pure-u-1 pure-u-md-1-3" $ do 
-      elClass "div" "typing-table-header" $ do
-        el "h2" $ text "Time"
-        elClass "span" "typing-table-type" $ do text $ (show (levelTime ls)) ++ "s"
-    elClass "div" "pure-u-1 pure-u-md-1-3" $ do 
-      elClass "div" "typing-table-header" $ do
-        el "h2" $ text "Letters"
-        elClass "span" "typing-table-type" $ do text $ show (numberLetters ls)
-    elClass "div" "pure-u-1 pure-u-md-1-3" $ do 
-      elClass "div" "typing-table-header" $ do
-        el "h2" $ text "Correct"
-        elClass "span" "typing-table-type" $ do text $ show (numberCorrect ls)
-    
+displayLevelSummary ls = elClass (T.pack "div") (T.pack "l-content") $ do
+  elClass (T.pack "div") (T.pack "typing-tables pure-g") $ do
+    column "Time" $ (show (levelTime ls)) ++ "s"
+    column "Letters" $ show (numberLetters ls)
+    column "Correct" $ show (numberCorrect ls)
   return ()
 
 aSecond :: NominalDiffTime
@@ -268,8 +337,7 @@ displayCounter counter = do
 
 textSpan :: MonadWidget t m => (Char, Int) -> m ()
 textSpan (letter, count) = elAttr "span" ("class" =: "none") $ do
-  el "p" $ do
-    text $ [letter] ++ ": " ++ show count
+  el (T.pack "p") $ text $ T.pack $ [letter] ++ ": " ++ show count
   return ()
 
 ec :: Count -> String -> String -> Count
