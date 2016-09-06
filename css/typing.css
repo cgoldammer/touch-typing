@@ -36,7 +36,7 @@ p {
     text-align: center;
     background-size: cover;
 
-    height: 200px;
+    height: 150px;
     width: 100%;
     margin-bottom: 3em;
     display: table;
@@ -139,7 +139,7 @@ p {
  */
 @media (min-width: 480px) {
     .banner {
-		margin-top: 100px;
+		margin-top: 50px;
         height: 100px;
     }
     .banner-head {
@@ -156,4 +156,17 @@ p {
 }
 .to-enter{
     color: gray;
-]
+}
+
+.hint {
+  font-size: 200%;
+  text-align: center;
+}
+
+.half {
+  opacity: 0.5;
+}
+
+.nothing {
+  opacity: 0.0;
+}
