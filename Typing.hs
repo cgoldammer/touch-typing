@@ -74,8 +74,7 @@ data MainState = MainState
   , currentText :: String
   , currentTextState :: DisplayString
   , completed :: Bool 
-  , timeElapsed :: Integer
-  , userId :: Maybe T.Text}
+  , timeElapsed :: Integer}
   deriving Show
 
 numberLettersEntered :: DisplayString -> Int
@@ -83,25 +82,24 @@ numberLettersEntered ds = maybe (length ds) id maybePosition
   where maybePosition = List.findIndex (==ToEnter) dt
         dt = fmap snd ds
 
-updateMainStateWithUser (MainState ctn ct cts cp t i) i' = MainState ctn ct cts cp t i'
 
 updateMainStateWithChar :: MainState -> Char -> MainState
-updateMainStateWithChar (MainState ctn ct cts cp t i) c = MainState ctn ct (updateDisplayString cts c) completed t i
+updateMainStateWithChar (MainState ctn ct cts cp t) c = MainState ctn ct (updateDisplayString cts c) completed t
   where numberEntered = numberLettersEntered cts
         completed = numberEntered >= (length ct) - 1
 
 updateMainStateWithNext :: MainState -> NextEvent -> MainState
-updateMainStateWithNext (MainState ctn ct cts cp t i) Next = MainState nextCount nextText (initialDisplayString nextText) False t i
+updateMainStateWithNext (MainState ctn ct cts cp t) Next = MainState nextCount nextText (initialDisplayString nextText) False t
   where nextCount = ctn + 1
         nextText = texts !! nextCount
-updateMainStateWithNext (MainState ctn ct cts cp t i) Repeat = MainState ctn ct (initialDisplayString ct) False t i
+updateMainStateWithNext (MainState ctn ct cts cp t) Repeat = MainState ctn ct (initialDisplayString ct) False t
 
-updateMainStateWithClock (MainState ctn ct cts cp t i) t2 = MainState ctn ct cts cp t2 i
+updateMainStateWithClock (MainState ctn ct cts cp t) t2 = MainState ctn ct cts cp t2
 
 initialDisplayString :: String -> DisplayString
 initialDisplayString s = zip s (repeat ToEnter)
 
-startingMainState = MainState 0 newText (initialDisplayString newText) False 0 Nothing
+startingMainState = MainState 0 newText (initialDisplayString newText) False 0
   where newText = texts !! 0
 
 displayState :: MonadWidget t m => DisplayLetter -> m ()
@@ -113,17 +111,16 @@ displayStates :: MonadWidget t m => String -> DisplayString -> m ()
 displayStates correct entered = sequence (fmap displayState (zip correct (fmap snd entered))) >> return ()
 
 displayMainState :: MonadWidget t m => MainState -> m ()
-displayMainState (MainState ctn ct cts cp t i) = do
+displayMainState (MainState ctn ct cts cp t) = do
   elClass "div" "banner" $ do
     elClass "h1" "banner-head" $ do displayStates ct cts
   return ()
 
 
-
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
 
 nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
-nextButtons (MainState ctn ct cts True _ i) = elClass "div" "l-content" $ do
+nextButtons (MainState ctn ct cts True _) = elClass "div" "l-content" $ do
   (n, r) <- elClass "div" "next-tables pure-g" $ do
     next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
       (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "next"
@@ -146,7 +143,6 @@ charToNext ' ' = Next
 charToNext '\r' = Repeat
 
 
-type X = XhrRequest T.Text
 
 getReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCredentials = True}
 logoutReq = xhrRequest "GET" "/snap/logout" def {_xhrRequestConfig_withCredentials = True}
@@ -162,17 +158,6 @@ addInfo (a, b) = T.pack $ "login=" ++ (T.unpack a) ++ "&password=" ++ (T.unpack 
 -- header :: MainState -> MonadWidget t m => m ()
 -- if not logged in, show newUser and login buttons
 -- if logged in, show logout button
-loginForm :: forall t m. MonadWidget t m => m (Event t X)
-loginForm = el "div" $ do
-
-    name <- textInput def
-    password <- textInput def
-    b <- button "log in"
-    let bothDyns = zipDynWith (,) (_textInput_value name) (_textInput_value password)
-    let reqString = fmap addInfo bothDyns
-    return $ tagPromptlyDyn (fmap (postForm "/snap/login") reqString) b
-
-
 postData :: String -> T.Text -> T.Text -> XhrRequest T.Text
 postData contentType  url text =
     XhrRequest "POST" url $ def { _xhrRequestConfig_headers = (T.pack "Content-type") =: (T.pack contentType)
@@ -188,18 +173,67 @@ userCleaner x
   | x == T.pack "" = Nothing
   | otherwise = Just x
 
-connect :: MonadWidget t m => Bool -> m (Event t (Maybe T.Text))
-connect False = el "div" $ do
-    postReqEvent :: Event t X <- loginForm
+
+buttonConfig :: ConnectType -> (T.Text, T.Text)
+buttonConfig Login = (T.pack "ok to log in", T.pack "/snap/login")
+buttonConfig _ = (T.pack "ok to register", T.pack "/snap/register")
+
+data ConnectType = Register | Login | Logout deriving (Eq, Show)
+data DisplayState = DisplayState {userId :: Maybe T.Text, connectType :: ConnectType} deriving Show
+displayUpdateType (DisplayState _ _) Logout = startingDisplayState
+displayUpdateType (DisplayState u t) t' = DisplayState u t'
+displayUpdateUser (DisplayState u t) u' = DisplayState u' t
+startingDisplayState = DisplayState Nothing Register
+
+
+connect :: MonadWidget t m => DisplayState -> m (Event t DisplayState)
+connect st@(DisplayState Nothing connectType) = el (T.pack "div") $ do
+    bLogin <- button (T.pack "log in")
+    bRegister <- button (T.pack "register")
+    let registerEvent = fmap (const Register) bRegister
+    let loginEvent = fmap (const Login) bLogin
+    postReqEvent <- loginForm connectType
     e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack postReqEvent)
     let getReqEvent = fmap (const getReq) e
     getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
     getText :: Dynamic t T.Text <- holdDyn (T.pack "not sent off yet") $ fmap getBody getResponse
     dynText getText
-    return $ updated $ fmap userCleaner getText
-connect True = do
-    logout <- button "log out"
-    return $ fmap (const Nothing) logout
+    let userEvent = updated $ fmap userCleaner getText
+    let connectEventUser = fmap (displayUpdateUser st) userEvent -- Event t DisplayState
+    let connectEventRegister = fmap (displayUpdateType st) $ leftmost [registerEvent, loginEvent] -- Event t ConnectEvent
+    let connectEvent = leftmost [connectEventUser, connectEventRegister]
+    return connectEvent
+connect (DisplayState (Just x) _) = do
+    logout <- button (T.pack "log out")
+    ev <- performRequestAsync $ fmap (const logoutReq) logout
+    return $ fmap (const startingDisplayState) ev
+
+
+type X = XhrRequest T.Text
+
+loginForm :: forall t m. MonadWidget t m => ConnectType -> m (Event t X)
+loginForm Register = el (T.pack "div") $ do
+    name <- textInput def
+    password <- textInput def
+    let bothDyns = zipDynWith (,) (_textInput_value name) (_textInput_value password)
+    let reqString = fmap addInfo bothDyns
+    b <- button $ T.pack "ok to register"
+    let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
+    let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
+    registerPostEvent :: Event t XhrResponse <- performRequestAsync registerPost
+    let registerLogin = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) registerPostEvent
+    return registerLogin
+
+loginForm Login = el (T.pack "div") $ do
+    name <- textInput def
+    password <- textInput def
+    let bothDyns = zipDynWith (,) (_textInput_value name) (_textInput_value password)
+    let reqString = fmap addInfo bothDyns
+    
+    b <- button $ T.pack "ok to login"
+    return $ tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
+
+
 
 
 typing :: MonadWidget t m => m ()
@@ -215,14 +249,17 @@ typing = do
   dynAtt <- mapDyn toHint divClass
   elDynAttr (T.pack "p") dynAtt $ text $ T.pack "Just type..."
 
-  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer, userTransformer]
-      let loggedInState = fmap (isJust . userId) currentState -- Dynamic t Bool
-      loginWidget :: Dynamic t (m (Event t (Maybe T.Text))) <- mapDyn connect loggedInState 
-      w :: Event t (Event t (Maybe T.Text)) <- dyn loginWidget
-      w2 :: Behavior t (Event t (Maybe T.Text)) <- hold never w
-      let currentUserEvent = switch w2 -- Event t (Maybe T.Text)
-      let userTransformer = fmap (flip updateMainStateWithUser) currentUserEvent
+  rec displayState :: Dynamic t DisplayState <- foldDyn ($) startingDisplayState $ mergeWith (.) [userTransformer]
+      loginWidget :: Dynamic t (m (Event t DisplayState)) <- mapDyn connect displayState 
+      w :: Event t (Event t DisplayState) <- dyn loginWidget
+      w2 :: Behavior t (Event t DisplayState) <- hold never w
+      let connectEvent = switch w2 -- Event t DisplayState
+      let userTransformer = fmap const connectEvent
 
+  dAsText :: Dynamic t T.Text <- mapDyn (T.pack . show) displayState
+  dynText dAsText
+
+  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
       all :: Dynamic t (m ()) <- mapDyn displayMainState currentState
       dyn all
       nextSimple :: Behavior t (Event t NextEvent) <- hold never nextEv
