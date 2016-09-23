@@ -18,6 +18,9 @@ import System.Random
 import System.IO.Unsafe
 import qualified Data.Text as T
 import Data.Maybe
+import GHCJS.DOM.Element hiding (drop)
+import Data.Monoid ((<>))
+
 
 default (T.Text)
 
@@ -174,64 +177,100 @@ userCleaner x
   | otherwise = Just x
 
 
-buttonConfig :: ConnectType -> (T.Text, T.Text)
-buttonConfig Login = (T.pack "ok to log in", T.pack "/snap/login")
-buttonConfig _ = (T.pack "ok to register", T.pack "/snap/register")
+data ConnectType = Register | Login | Logout | CloseWindow deriving (Eq, Show)
+data DisplayState = DisplayState {
+    userId :: Maybe T.Text,
+    connectType :: ConnectType,
+    open :: Bool} deriving Show
+displayUpdateType (DisplayState _ _ _) Logout = startingDisplayState
+displayUpdateType (DisplayState _ _ _) CloseWindow = startingDisplayState
+displayUpdateType (DisplayState u t o) t' = DisplayState u t' True
+displayUpdateUser (DisplayState u t o) u' = DisplayState u' t False
+startingDisplayState = DisplayState Nothing Register False
 
-data ConnectType = Register | Login | Logout deriving (Eq, Show)
-data DisplayState = DisplayState {userId :: Maybe T.Text, connectType :: ConnectType} deriving Show
-displayUpdateType (DisplayState _ _) Logout = startingDisplayState
-displayUpdateType (DisplayState u t) t' = DisplayState u t'
-displayUpdateUser (DisplayState u t) u' = DisplayState u' t
-startingDisplayState = DisplayState Nothing Register
+menuLink :: MonadWidget t m => T.Text -> m (Event t ())
+menuLink t = do
+    (e, _) <- elClass (T.pack "li") (T.pack "pure-menu-item") $ do
+      elClass "div" "pure-menu-link" $ do
+        elAttr' "a" (Map.fromList [("class", "pure-menu-link")]) $ do
+          text t
+    return $ domEvent Click e
 
+
+menu :: MonadWidget t m => [(T.Text, ConnectType)] -> m (Event t ConnectType)
+menu ls = do
+    events :: [Event t ()] <- elClass (T.pack "div") (T.pack "pure-menu pure-menu-horizontal") $ do
+      elClass (T.pack "ul") (T.pack "pure-menu-list") $ do  
+        elClass "li" "pure-menu-heading" $ do
+            text "Touch typist"
+        ev <- mapM menuLink $ fmap fst ls
+        return ev
+    let menuEv = fmap (\(a, b) -> fmap (const b) a) $ zip events (fmap snd ls)
+    return $ leftmost menuEv
+        
 
 connect :: MonadWidget t m => DisplayState -> m (Event t DisplayState)
-connect st@(DisplayState Nothing connectType) = el (T.pack "div") $ do
-    bLogin <- button (T.pack "log in")
-    bRegister <- button (T.pack "register")
-    let registerEvent = fmap (const Register) bRegister
-    let loginEvent = fmap (const Login) bLogin
-    postReqEvent <- loginForm connectType
-    e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack postReqEvent)
+connect st@(DisplayState Nothing connectType open) = el (T.pack "div") $ do
+    menuEvent <- menu [("login", Login), ("register", Register)]
+    (closeEvent, e) <- if open
+        then do
+            (closeEvent, postReqEvent) <- loginForm connectType
+            e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack postReqEvent)
+            return (closeEvent, e)
+        else do
+            return (never, never)
     let getReqEvent = fmap (const getReq) e
     getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
     getText :: Dynamic t T.Text <- holdDyn (T.pack "not sent off yet") $ fmap getBody getResponse
     dynText getText
     let userEvent = updated $ fmap userCleaner getText
     let connectEventUser = fmap (displayUpdateUser st) userEvent -- Event t DisplayState
-    let connectEventRegister = fmap (displayUpdateType st) $ leftmost [registerEvent, loginEvent] -- Event t ConnectEvent
+    let connectEventRegister = fmap (displayUpdateType st) $ leftmost [menuEvent, closeEvent] -- Event t ConnectEvent
     let connectEvent = leftmost [connectEventUser, connectEventRegister]
     return connectEvent
-connect (DisplayState (Just x) _) = do
-    logout <- button (T.pack "log out")
-    ev <- performRequestAsync $ fmap (const logoutReq) logout
+connect (DisplayState (Just x) _ _) = do
+    logoutClick <- menu [("logout", Logout)]
+    ev <- performRequestAsync $ fmap (const logoutReq) logoutClick
     return $ fmap (const startingDisplayState) ev
-
 
 type X = XhrRequest T.Text
 
-loginForm :: forall t m. MonadWidget t m => ConnectType -> m (Event t X)
-loginForm Register = el (T.pack "div") $ do
-    name <- textInput def
-    password <- textInput def
-    let bothDyns = zipDynWith (,) (_textInput_value name) (_textInput_value password)
+-- Todo: Register endpoint should return "username exists" if it does.
+-- In that case, stay at the register screen.
+pButton :: MonadWidget t m => T.Text -> m (Event t T.Text)
+pButton t = do
+    (b, _) <- elClass' "button" "button pure-button" $ do
+        text t
+    return $ fmap (const t) $ domEvent Click b
+
+
+loginFields :: MonadWidget t m => m ((Dynamic t T.Text, Dynamic t T.Text, Event t T.Text, Event t ConnectType))
+loginFields = do
+    elAttr "div" ("class" =: "modalDialog") $ do
+        elClass "div" "pure-form" $ do
+            el "fieldset" $ do
+                name <- textInput $ def & attributes .~ constDyn (mconcat ["type" =: "email", "placeholder" =: "email"])
+                password <- textInput $ def & attributes .~ constDyn ("type" =: "password" <> "placeholder" =: "Password")
+                b <- pButton "ok to login"
+                closeButton <- pButton "close window"
+                return ((_textInput_value name), (_textInput_value password), b, fmap (const CloseWindow) closeButton)
+                
+loginForm :: MonadWidget t m => ConnectType -> m ((Event t ConnectType, Event t X))
+loginForm Register = elAttr "div" ("class" =: "modal") $ do
+    (name, password, b, closeEvent) <- loginFields
+    let bothDyns = zipDynWith (,) name password
     let reqString = fmap addInfo bothDyns
-    b <- button $ T.pack "ok to register"
     let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
     let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
     registerPostEvent :: Event t XhrResponse <- performRequestAsync registerPost
     let registerLogin = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) registerPostEvent
-    return registerLogin
-
-loginForm Login = el (T.pack "div") $ do
-    name <- textInput def
-    password <- textInput def
-    let bothDyns = zipDynWith (,) (_textInput_value name) (_textInput_value password)
+    return (closeEvent, registerLogin)
+loginForm Login = elAttr "div" ("class" =: "modal") $ do
+    (name, password, b, closeEvent) <- loginFields
+    let bothDyns = zipDynWith (,) name password
     let reqString = fmap addInfo bothDyns
-    
-    b <- button $ T.pack "ok to login"
-    return $ tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
+    let loginEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
+    return (closeEvent, loginEvent)
 
 
 
@@ -247,14 +286,14 @@ typing = do
 
   divClass <- holdDyn "half" (fmap (const "nothing") charEvent)
   dynAtt <- mapDyn toHint divClass
-  elDynAttr (T.pack "p") dynAtt $ text $ T.pack "Just type..."
-
   rec displayState :: Dynamic t DisplayState <- foldDyn ($) startingDisplayState $ mergeWith (.) [userTransformer]
       loginWidget :: Dynamic t (m (Event t DisplayState)) <- mapDyn connect displayState 
       w :: Event t (Event t DisplayState) <- dyn loginWidget
       w2 :: Behavior t (Event t DisplayState) <- hold never w
       let connectEvent = switch w2 -- Event t DisplayState
       let userTransformer = fmap const connectEvent
+  elDynAttr (T.pack "p") dynAtt $ text $ T.pack "Just type..."
+
 
   dAsText :: Dynamic t T.Text <- mapDyn (T.pack . show) displayState
   dynText dAsText
