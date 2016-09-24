@@ -176,17 +176,19 @@ userCleaner x
   | x == T.pack "" = Nothing
   | otherwise = Just x
 
+data ActiveTab = Typing | Summary deriving Show
 
-data ConnectType = Register | Login | Logout | CloseWindow deriving (Eq, Show)
+data ConnectType = Register | Login | Logout | CloseWindow | GoToTyping | GoToSummary deriving (Eq, Show)
 data DisplayState = DisplayState {
     userId :: Maybe T.Text,
     connectType :: ConnectType,
-    open :: Bool} deriving Show
-displayUpdateType (DisplayState _ _ _) Logout = startingDisplayState
-displayUpdateType (DisplayState _ _ _) CloseWindow = startingDisplayState
-displayUpdateType (DisplayState u t o) t' = DisplayState u t' True
-displayUpdateUser (DisplayState u t o) u' = DisplayState u' t False
-startingDisplayState = DisplayState Nothing Register False
+    open :: Bool,
+    activeTab :: ActiveTab} deriving Show
+displayUpdateType (DisplayState _ _ _ _) Logout = startingDisplayState
+displayUpdateType (DisplayState _ _ _ _) CloseWindow = startingDisplayState
+displayUpdateType (DisplayState u t o a) t' = DisplayState u t' True a
+displayUpdateUser (DisplayState u t o a) u' = DisplayState u' t False a
+startingDisplayState = DisplayState Nothing Register False Typing
 
 menuLink :: MonadWidget t m => T.Text -> m (Event t ())
 menuLink t = do
@@ -203,14 +205,17 @@ menu ls = do
       elClass (T.pack "ul") (T.pack "pure-menu-list") $ do  
         elClass "li" "pure-menu-heading" $ do
             text "Touch typist"
+        typingLink <- menuLink "Typing"
+        summaryLink <- menuLink "Summary"
         ev <- mapM menuLink $ fmap fst ls
-        return ev
-    let menuEv = fmap (\(a, b) -> fmap (const b) a) $ zip events (fmap snd ls)
+        return $ [typingLink, summaryLink] ++ ev
+    let connectEvents = [GoToTyping, GoToSummary] ++ fmap snd ls
+    let menuEv = fmap (\(a, b) -> fmap (const b) a) $ zip events connectEvents
     return $ leftmost menuEv
         
 
 connect :: MonadWidget t m => DisplayState -> m (Event t DisplayState)
-connect st@(DisplayState Nothing connectType open) = el (T.pack "div") $ do
+connect st@(DisplayState Nothing connectType open activeTab) = el (T.pack "div") $ do
     menuEvent <- menu [("login", Login), ("register", Register)]
     (closeEvent, e) <- if open
         then do
@@ -228,7 +233,7 @@ connect st@(DisplayState Nothing connectType open) = el (T.pack "div") $ do
     let connectEventRegister = fmap (displayUpdateType st) $ leftmost [menuEvent, closeEvent] -- Event t ConnectEvent
     let connectEvent = leftmost [connectEventUser, connectEventRegister]
     return connectEvent
-connect (DisplayState (Just x) _ _) = do
+connect (DisplayState (Just x) _ _ activeTab) = do
     logoutClick <- menu [("logout", Logout)]
     ev <- performRequestAsync $ fmap (const logoutReq) logoutClick
     return $ fmap (const startingDisplayState) ev
@@ -271,36 +276,34 @@ loginForm Login = elAttr "div" ("class" =: "modal") $ do
     let reqString = fmap addInfo bothDyns
     let loginEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
     return (closeEvent, loginEvent)
+loginForm GoToSummary = do
+  return (never, never)
+loginForm GoToTyping = do
+  return (never, never)
+
 
 
 
 
 typing :: MonadWidget t m => m ()
 typing = do
-  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text ""
-  
-  schedulePostBuild $ IOClass.liftIO $ Element.focus $ _el_element keyListenerDiv
+  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text "hidden div"
   let allCharEvent = fmap chr $ domEvent Keypress keyListenerDiv -- Event t Char
   let charEvent = ffilter ((flip elem) ['a'..'z']) allCharEvent
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
 
   divClass <- holdDyn "half" (fmap (const "nothing") charEvent)
-  dynAtt <- mapDyn toHint divClass
   rec displayState :: Dynamic t DisplayState <- foldDyn ($) startingDisplayState $ mergeWith (.) [userTransformer]
-      loginWidget :: Dynamic t (m (Event t DisplayState)) <- mapDyn connect displayState 
-      w :: Event t (Event t DisplayState) <- dyn loginWidget
+      w :: Event t (Event t DisplayState) <- dyn $ fmap connect displayState
       w2 :: Behavior t (Event t DisplayState) <- hold never w
       let connectEvent = switch w2 -- Event t DisplayState
       let userTransformer = fmap const connectEvent
-  elDynAttr (T.pack "p") dynAtt $ text $ T.pack "Just type..."
-
-
-  dAsText :: Dynamic t T.Text <- mapDyn (T.pack . show) displayState
-  dynText dAsText
+  void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ userTransformer
+  elDynAttr (T.pack "p") (fmap toHint divClass) $ text $ T.pack "Just type..."
+  dynText $ fmap (T.pack . show) displayState
 
   rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
-      all :: Dynamic t (m ()) <- mapDyn displayMainState currentState
-      dyn all
+      dyn $ fmap displayMainState currentState
       nextSimple :: Behavior t (Event t NextEvent) <- hold never nextEv
       let nextCharEvent = fmap charToNext $ ffilter (\a -> a==' ' || a=='\r') allCharEvent
       let nextEvent = leftmost [nextCharEvent, switch nextSimple]
@@ -311,7 +314,7 @@ typing = do
 
       let eIsFirst = ffilter hasStarted (updated dIsFirst)
 
-      let eHasCompleted = attachDynWith hasCompleted currentState charEvent
+      let eHasCompleted = attachPromptlyDynWith hasCompleted currentState charEvent
       let eHasStarted = fmap fst $ ffilter fst (updated dIsFirst)
 
       levelEndGate :: Behavior t Bool <- hold False eHasCompleted
@@ -320,23 +323,14 @@ typing = do
       dNew :: Dynamic t (m (Dynamic t Integer)) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
       clockTime :: Event t (Dynamic t Integer) <- dyn dNew
       dyndyn :: Dynamic t (Dynamic t Integer) <- holdDyn (constDyn 0) clockTime
-      let clockDyn = joinDyn dyndyn
+      let clockTransformer = fmap (flip updateMainStateWithClock) (updated (join dyndyn)) -- Event t (MainState -> MainState)
+      dyn $ fmap (displayLevelSummary . levelSummary) currentState
 
-      let clockTransformer = fmap (flip updateMainStateWithClock) (updated clockDyn) -- Event t (MainState -> MainState)
-
-      dynSummary <- mapDyn levelSummary currentState
-      summaryWidget <- mapDyn displayLevelSummary dynSummary
-      dyn summaryWidget
-
-      nextB <- mapDyn nextButtons currentState
-      nextEv :: Event t (Event t NextEvent) <- dyn nextB
-
-      stateAsText :: Dynamic t T.Text <- mapDyn (T.pack . show) currentState
-      dynText stateAsText
+      nextEv :: Event t (Event t NextEvent) <- dyn $ fmap nextButtons currentState
+      dynText $ fmap (T.pack . show) currentState
 
       -- Upon complete level, push LevelSummary to db
       -- liftIO submitLevelSummary $ levelSummary 
-  void $ performArg (const $ Element.focus (_el_element keyListenerDiv)) $ nextTransformer
   return ()
 
 
