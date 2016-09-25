@@ -122,18 +122,19 @@ displayMainState (MainState ctn ct cts cp t) = do
 
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
 
+nextButton :: MonadWidget t m => T.Text -> m (Event t ())
+nextButton t = do
+  next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
+    (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "next"
+    return $ domEvent Click b
+  return next
+
 nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
 nextButtons (MainState ctn ct cts True _) = elClass "div" "l-content" $ do
   (n, r) <- elClass "div" "next-tables pure-g" $ do
-    next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
-      (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "next"
-      return $ domEvent Click b
-    repeat <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
-      (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "repeat"
-      return $ domEvent Click b
+    next <- nextButton "next"
+    repeat <- nextButton "repeat"
     return (next, repeat)
-
-  -- displayCounter $ errCounter (fmap fst cts) ct
   return $ leftmost [fmap (const Next) n, fmap (const Repeat) r]
 nextButtons _ = do
   blank
@@ -282,9 +283,6 @@ loginForm GoToTyping = do
   return (never, never)
 
 
-
-
-
 typing :: MonadWidget t m => m ()
 typing = do
   (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text "hidden div"
@@ -314,11 +312,18 @@ typing = do
 
       let eIsFirst = ffilter hasStarted (updated dIsFirst)
 
+      let eHasNotCompleted = attachPromptlyDynWith hasNotCompleted currentState charEvent
       let eHasCompleted = attachPromptlyDynWith hasCompleted currentState charEvent
       let eHasStarted = fmap fst $ ffilter fst (updated dIsFirst)
 
-      levelEndGate :: Behavior t Bool <- hold False eHasCompleted
-      let dynNew2 = dynNew levelEndGate eHasStarted
+      notLevelEnd :: Behavior t Bool <- hold False eHasNotCompleted
+      let dynNew2 = dynNew notLevelEnd eHasStarted
+      let d = postForm (T.pack "/snap/api/levels") -- T.Text -> XhRRequest
+      let sf ms = summary (currentText ms) ((numberCorrect . levelSummary) ms) (timeElapsed ms)
+      let dLevelS = fmap (d . sf) currentState -- Dynamic t XhrRequest
+      let lastCharTransformer = gate (current (fmap lastEntered currentState)) charTransformer
+      let sendPost = tagPromptlyDyn dLevelS lastCharTransformer
+      registerPostEvent :: Event t XhrResponse <- performRequestAsync sendPost
 
       dNew :: Dynamic t (m (Dynamic t Integer)) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
       clockTime :: Event t (Dynamic t Integer) <- dyn dNew
@@ -331,8 +336,13 @@ typing = do
 
       -- Upon complete level, push LevelSummary to db
       -- liftIO submitLevelSummary $ levelSummary 
+  void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ nextTransformer
   return ()
 
+lastEntered ms = length (List.filter (==ToEnter) $ fmap snd $ currentTextState ms) == 1
+
+summary :: String -> Int -> Integer -> T.Text
+summary t nc lt = T.pack $ "text=" ++ t ++ "&numberCorrect=" ++ (show nc) ++ "&levelTime=" ++ (show lt)
 
 dynNew :: MonadWidget t m => Behavior t Bool -> Event t Bool -> m (Dynamic t Integer)
 dynNew e hasStarted = do
@@ -348,8 +358,11 @@ dynNew e hasStarted = do
   return $ clock
 
 
+hasNotCompleted :: MainState -> a -> Bool
+hasNotCompleted ms _ = not $ completed ms
+
 hasCompleted :: MainState -> a -> Bool
-hasCompleted ms _ = not $ completed ms
+hasCompleted ms _ = completed ms
 
 hasStarted :: (Bool, Bool) -> Bool
 hasStarted (_, True) = True
