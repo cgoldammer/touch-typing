@@ -157,7 +157,7 @@ getReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCre
 getSummaries = xhrRequest "GET" "/snap/api/levels" def {_xhrRequestConfig_withCredentials = True}
 logoutReq = xhrRequest "GET" "/snap/logout" def {_xhrRequestConfig_withCredentials = True}
 
-data LevelSummaryResponse = LevelSummaryResponse {time :: String, textS :: String, levelTimeS :: String, userIdS :: Int, numberCorrectS :: Int, idS :: Int, levelIdS :: Int} deriving (Show)
+data LevelSummaryResponse = LevelSummaryResponse {time :: String, textS :: String, levelTimeS :: Int, userIdS :: Int, numberCorrectS :: Int, idS :: Int, levelIdS :: Int} deriving (Show)
 
 -- instance ToJSON LevelSummaryResponse
 instance FromJSON LevelSummaryResponse where
@@ -207,10 +207,13 @@ data DisplayState = DisplayState {
     connectType :: ConnectType,
     open :: Bool,
     activeTab :: ActiveTab} deriving Show
+
 displayUpdateType (DisplayState _ _ _ _) Logout = startingDisplayState
 displayUpdateType (DisplayState _ _ _ _) CloseWindow = startingDisplayState
 displayUpdateType (DisplayState u t o a) t' = DisplayState u t' True a
+
 displayUpdateUser (DisplayState u t o a) u' = DisplayState u' t False a
+
 startingDisplayState = DisplayState Nothing Register False Typing
 
 menuLink :: MonadWidget t m => T.Text -> m (Event t ())
@@ -231,11 +234,6 @@ menu ls = do
         typingLink <- menuLink "Typing"
         summaryLink <- menuLink "Summary"
         ev <- mapM menuLink $ fmap fst ls
-        -- let getReqEvent = fmap (const getSummaries) summaryLink
-        -- getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
-        -- let summ = (fmap decodeXhrResponse getResponse) :: Event t (Maybe [LevelSummaryResponse])
-        -- let sum2 = fmap (T.pack . (maybe "nothing" show)) summ -- Event t T.Text
-        -- getText :: Dynamic t T.Text <- holdDyn (T.pack "summaries") (fmap (const (T.Text "hi")) sum2)
         return $ [typingLink, summaryLink] ++ ev
     let connectEvents = [GoToTyping, GoToSummary] ++ fmap snd ls
     let menuEv = fmap (\(a, b) -> fmap (const b) a) $ zip events connectEvents
@@ -243,8 +241,13 @@ menu ls = do
         
 
 connect :: MonadWidget t m => DisplayState -> m (Event t DisplayState)
-connect st@(DisplayState Nothing connectType open activeTab) = el (T.pack "div") $ do
-    menuEvent <- menu [("login", Login), ("register", Register)]
+connect st@(DisplayState user connectType open activeTab) = el (T.pack "div") $ do
+    menuEvent <- if isJust user
+      then menu [("logout", Logout)]
+      else menu [("login", Login), ("register", Register)]
+
+    ev <- performRequestAsync $ fmap (const logoutReq) $ (ffilter (\a -> a==Logout)) menuEvent
+      
     (closeEvent, e) <- if open
         then do
             (closeEvent, postReqEvent) <- loginForm connectType
@@ -261,10 +264,6 @@ connect st@(DisplayState Nothing connectType open activeTab) = el (T.pack "div")
     let connectEventRegister = fmap (displayUpdateType st) $ leftmost [menuEvent, closeEvent] -- Event t ConnectEvent
     let connectEvent = leftmost [connectEventUser, connectEventRegister]
     return connectEvent
-connect (DisplayState (Just x) _ _ activeTab) = do
-    logoutClick <- menu [("logout", Logout)]
-    ev <- performRequestAsync $ fmap (const logoutReq) logoutClick
-    return $ fmap (const startingDisplayState) ev
 
 type X = XhrRequest T.Text
 
@@ -398,25 +397,36 @@ displayLSRD dslr = do
 
 displayLSRL :: MonadWidget t m => [LevelSummaryResponse] -> m ()
 displayLSRL dslr = do
+  let fields = ["time", "level text", "time in seconds", "number correct", "share correct"]
   elClass "div" "pure-g" $ do
-    cell $ T.pack "time"
-    cell $ T.pack "level text"
-    cell $ T.pack "number correct"
+    mapM (cellHeader . T.pack) fields
   mapM displayLSR dslr
   return ()
 
-cell :: MonadWidget t m => T.Text -> m ()
-cell val = do 
-  elClass "div" "pure-u-1-3" $ do
+
+cellType :: MonadWidget t m => Bool -> T.Text -> m ()
+cellType header val = do 
+  let s = if header then "header" else "cell"
+  elClass "div" (T.pack ("pure-u-1-5 " ++ s)) $ do
     text val
   return ()
+
+cell :: MonadWidget t m => T.Text -> m ()
+cell = cellType False
+
+cellHeader :: MonadWidget t m => T.Text -> m ()
+cellHeader = cellType True
 
 displayLSR :: MonadWidget t m => LevelSummaryResponse -> m ()
 displayLSR lsr = do
   elClass "div" "pure-g" $ do
+    let text = textS lsr
+    let correct = numberCorrectS lsr
     cell $ T.pack $ time lsr
-    cell $ T.pack $ textS lsr
-    cell $ T.pack $ show $ numberCorrectS lsr
+    cell $ T.pack text
+    cell $ T.pack $ show $ levelTimeS lsr
+    cell $ T.pack $ show correct
+    cell $ T.pack $ show $ quot (correct * 100) (length text)
   return ()
 
 lastEntered ms = length (List.filter (==ToEnter) $ fmap snd $ currentTextState ms) == 1
