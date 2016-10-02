@@ -1,4 +1,4 @@
-{-# LANGUAGE AllowAmbiguousTypes, RecursiveDo, ScopedTypeVariables, FlexibleContexts, TypeFamilies, GADTs, ConstraintKinds, TemplateHaskell, OverloadedStrings, FlexibleInstances, ExtendedDefaultRules #-}
+{-# LANGUAGE AllowAmbiguousTypes, RecursiveDo, ScopedTypeVariables, FlexibleContexts, TypeFamilies, GADTs, ConstraintKinds, TemplateHaskell, OverloadedStrings, FlexibleInstances, ExtendedDefaultRules, DeriveGeneric #-}
 
 
 import Prelude hiding (mapM, mapM_, all, sequence)
@@ -20,6 +20,8 @@ import qualified Data.Text as T
 import Data.Maybe
 import GHCJS.DOM.Element hiding (drop)
 import Data.Monoid ((<>))
+import Data.Aeson
+import GHC.Generics
 
 
 default (T.Text)
@@ -113,6 +115,11 @@ displayState (ch, ls) = elAttr (T.pack "span") ((T.pack "class") =: (stateCss ls
 displayStates :: MonadWidget t m => String -> DisplayString -> m ()
 displayStates correct entered = sequence (fmap displayState (zip correct (fmap snd entered))) >> return ()
 
+displayMainStateBool :: MonadWidget t m => Bool -> MainState -> m ()
+displayMainStateBool True ms = displayMainState ms
+displayMainStateBool False _ = text "not showing"
+
+
 displayMainState :: MonadWidget t m => MainState -> m ()
 displayMainState (MainState ctn ct cts cp t) = do
   elClass "div" "banner" $ do
@@ -146,14 +153,29 @@ performArg f x = performEvent (fmap (IOClass.liftIO . f) x)
 charToNext ' ' = Next
 charToNext '\r' = Repeat
 
-
-
 getReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCredentials = True}
+getSummaries = xhrRequest "GET" "/snap/api/levels" def {_xhrRequestConfig_withCredentials = True}
 logoutReq = xhrRequest "GET" "/snap/logout" def {_xhrRequestConfig_withCredentials = True}
 
+data LevelSummaryResponse = LevelSummaryResponse {time :: String, textS :: String, levelTimeS :: String, userIdS :: Int, numberCorrectS :: Int, idS :: Int, levelIdS :: Int} deriving (Show)
+
+-- instance ToJSON LevelSummaryResponse
+instance FromJSON LevelSummaryResponse where
+  parseJSON (Object v) = LevelSummaryResponse <$> 
+                          v.: "time" <*>
+                          v.: "text" <*>
+                          v.: "levelTime" <*>
+                          v.: "userId" <*>
+                          v.: "numberCorrect" <*>
+                          v.: "id" <*>
+                          v.: "levelId"
+
+data L = L {aaa :: Int} deriving (Show)
+instance FromJSON L where
+  parseJSON (Object v) = L <$> v.: "id"
+  
 getBody :: XhrResponse -> T.Text
 getBody x = maybe (T.pack "") id (_xhrResponse_responseText x)
-
 
 addInfo :: (T.Text, T.Text) -> T.Text
 addInfo (a, b) = T.pack $ "login=" ++ (T.unpack a) ++ "&password=" ++ (T.unpack b)
@@ -209,6 +231,11 @@ menu ls = do
         typingLink <- menuLink "Typing"
         summaryLink <- menuLink "Summary"
         ev <- mapM menuLink $ fmap fst ls
+        -- let getReqEvent = fmap (const getSummaries) summaryLink
+        -- getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
+        -- let summ = (fmap decodeXhrResponse getResponse) :: Event t (Maybe [LevelSummaryResponse])
+        -- let sum2 = fmap (T.pack . (maybe "nothing" show)) summ -- Event t T.Text
+        -- getText :: Dynamic t T.Text <- holdDyn (T.pack "summaries") (fmap (const (T.Text "hi")) sum2)
         return $ [typingLink, summaryLink] ++ ev
     let connectEvents = [GoToTyping, GoToSummary] ++ fmap snd ls
     let menuEv = fmap (\(a, b) -> fmap (const b) a) $ zip events connectEvents
@@ -227,7 +254,7 @@ connect st@(DisplayState Nothing connectType open activeTab) = el (T.pack "div")
             return (never, never)
     let getReqEvent = fmap (const getReq) e
     getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
-    getText :: Dynamic t T.Text <- holdDyn (T.pack "not sent off yet") $ fmap getBody getResponse
+    getText :: Dynamic t T.Text <- holdDyn (T.pack "") $ fmap getBody getResponse
     dynText getText
     let userEvent = updated $ fmap userCleaner getText
     let connectEventUser = fmap (displayUpdateUser st) userEvent -- Event t DisplayState
@@ -282,22 +309,16 @@ loginForm GoToSummary = do
 loginForm GoToTyping = do
   return (never, never)
 
+-- A widget to print the summaries.
+-- Logic needed: If summaryEvent, then show it
+-- Otherwise show main screen
 
-typing :: MonadWidget t m => m ()
-typing = do
-  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text "hidden div"
-  let allCharEvent = fmap chr $ domEvent Keypress keyListenerDiv -- Event t Char
+typingWidget :: MonadWidget t m => Dynamic t DisplayState -> Event t Char -> m ()
+typingWidget displayState allCharEvent = do
   let charEvent = ffilter ((flip elem) ['a'..'z']) allCharEvent
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
-
-  divClass <- holdDyn "half" (fmap (const "nothing") charEvent)
-  rec displayState :: Dynamic t DisplayState <- foldDyn ($) startingDisplayState $ mergeWith (.) [userTransformer]
-      w :: Event t (Event t DisplayState) <- dyn $ fmap connect displayState
-      w2 :: Behavior t (Event t DisplayState) <- hold never w
-      let connectEvent = switch w2 -- Event t DisplayState
-      let userTransformer = fmap const connectEvent
-  void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ userTransformer
-  elDynAttr (T.pack "p") (fmap toHint divClass) $ text $ T.pack "Just type..."
+  divClass <- holdDyn (T.pack "half") (fmap (const (T.pack "")) charTransformer)
+  -- elDynAttr (T.pack "p") (fmap toHint divClass) $ text $ T.pack "Just type..."
   dynText $ fmap (T.pack . show) displayState
 
   rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
@@ -312,8 +333,8 @@ typing = do
 
       let eIsFirst = ffilter hasStarted (updated dIsFirst)
 
-      let eHasNotCompleted = attachPromptlyDynWith hasNotCompleted currentState charEvent
-      let eHasCompleted = attachPromptlyDynWith hasCompleted currentState charEvent
+      let eHasNotCompleted = attachPromptlyDynWith hasNotCompleted currentState charTransformer
+      let eHasCompleted = attachPromptlyDynWith hasCompleted currentState charTransformer
       let eHasStarted = fmap fst $ ffilter fst (updated dIsFirst)
 
       notLevelEnd :: Behavior t Bool <- hold False eHasNotCompleted
@@ -333,10 +354,69 @@ typing = do
 
       nextEv :: Event t (Event t NextEvent) <- dyn $ fmap nextButtons currentState
       dynText $ fmap (T.pack . show) currentState
+  return ()
+  -- void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ nextTransformer
 
-      -- Upon complete level, push LevelSummary to db
-      -- liftIO submitLevelSummary $ levelSummary 
-  void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ nextTransformer
+typing :: MonadWidget t m => m ()
+typing = do
+  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text "hiddne"
+  let allCharEvent = fmap chr $ domEvent Keypress keyListenerDiv -- Event t Char
+
+  rec displayState :: Dynamic t DisplayState <- foldDyn ($) startingDisplayState $ mergeWith (.) [userTransformer]
+      w :: Event t (Event t DisplayState) <- dyn $ fmap connect displayState
+      w2 :: Behavior t (Event t DisplayState) <- hold never w
+      let connectEvent = switch w2 -- Event t DisplayState
+      let userTransformer = fmap const connectEvent
+
+  let getReqEvent = fmap (const getSummaries) $ ffilter (\a -> connectType a == GoToSummary) connectEvent
+  getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
+  received <- holdDyn "No" $ fmap (const "yes") getResponse
+  dynText received
+  let summ = (fmap decodeXhrResponse getResponse) :: Event t (Maybe [LevelSummaryResponse])
+  let sum2 = fmap (T.pack . (maybe "nothing" show)) summ -- Event t T.Text
+  let lsr = fmap (maybe [] id) summ -- Event t [LevelSummaryResponse]
+  lsrD <- holdDyn [] lsr -- Dynamic t [LevelSummaryResponse]
+  let sl = fmap (displayLSRL . take 5) lsrD
+  void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ userTransformer
+  let isSummary = fmap (\s -> connectType s == GoToSummary) displayState -- Dynamic t Bool
+  let ww = fmap (widg displayState allCharEvent sl) isSummary
+  dyn ww
+  return ()
+
+widg :: MonadWidget t m => Dynamic t DisplayState -> Event t Char -> Dynamic t (m ()) -> Bool -> m ()
+widg ds ac sl True = do
+  text "Summaries"
+  dyn sl
+  return ()
+widg ds ac sl False = typingWidget ds ac
+
+displayLSRD :: MonadWidget t m => Dynamic t LevelSummaryResponse -> m ()
+displayLSRD dslr = do
+  let mm = fmap displayLSR dslr
+  dyn mm
+  return ()
+
+displayLSRL :: MonadWidget t m => [LevelSummaryResponse] -> m ()
+displayLSRL dslr = do
+  elClass "div" "pure-g" $ do
+    cell $ T.pack "time"
+    cell $ T.pack "level text"
+    cell $ T.pack "number correct"
+  mapM displayLSR dslr
+  return ()
+
+cell :: MonadWidget t m => T.Text -> m ()
+cell val = do 
+  elClass "div" "pure-u-1-3" $ do
+    text val
+  return ()
+
+displayLSR :: MonadWidget t m => LevelSummaryResponse -> m ()
+displayLSR lsr = do
+  elClass "div" "pure-g" $ do
+    cell $ T.pack $ time lsr
+    cell $ T.pack $ textS lsr
+    cell $ T.pack $ show $ numberCorrectS lsr
   return ()
 
 lastEntered ms = length (List.filter (==ToEnter) $ fmap snd $ currentTextState ms) == 1
@@ -352,9 +432,6 @@ dynNew e hasStarted = do
   let tlTimeGated = gate e tlTime -- Event t Integer
   let tlTime2 = leftmost [fmap (const 0) hasStarted, tlTimeGated]
   clock :: Dynamic t Integer <- holdDyn 0 tlTime2
-  -- el "p" $ do
-  --   text "Time elapsed: "
-  --   dynText clock
   return $ clock
 
 
