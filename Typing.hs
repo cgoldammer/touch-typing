@@ -262,7 +262,6 @@ connect st@(DisplayState user connectType open activeTab) = el (T.pack "div") $ 
     menuEvent <- if isJust user
       then menu [("logout", Logout)] (constDyn user)
       else menu [("login", Login), ("register", Register)] (constDyn user)
-    -- ev <- performRequestAsync $ fmap (const logoutReq) $ (ffilter (\a -> a==Logout)) menuEvent
 
     let menuEventResult = fmap (displayUpdateType st) menuEvent
     let loginFormResult = fmap (\(a, b) -> displayUpdateFromLoginForm a b st) loginFormEvent
@@ -301,16 +300,30 @@ type User = T.Text
 -- Event t (ConnectType, Maybe User)
 -- A loginform returns: What was clicked, and whether a user resulted from it.
 loginForm :: MonadWidget t m => ConnectType -> m (Event t (ConnectType, Maybe User))
--- loginForm Register = elAttr "div" ("class" =: "modal") $ do
---     (name, password, b, closeEvent) <- loginFields
---     let bothDyns = zipDynWith (,) name password
---     let reqString = fmap addInfo bothDyns
---     let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
---     let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
---     registerPostEvent :: Event t XhrResponse <- performRequestAsync registerPost
---     let registerLogin = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) registerPostEvent
---     e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack registerLogin)
---     return (closeEvent, e)
+loginForm Register = elAttr "div" ("class" =: "modal") $ do
+    elAttr "div" ("class" =: "modalDialog") $ do
+        elClass "div" "pure-form" $ do
+            el "fieldset" $ do
+              (name, password, b, closeEvent) <- loginFields
+              let bothDyns = zipDynWith (,) name password
+              let reqString = fmap addInfo bothDyns
+              let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
+              let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
+              e :: Event t XhrResponse <- performRequestAsync registerPost
+              userRegisterResponseText :: Dynamic t T.Text <- holdDyn (T.pack "Log") $ fmap getBody e
+              dynText userRegisterResponseText
+              let registerSuccessEvent  = fmap (getEventGivenUser . getBody) e -- Event t Bool
+              let loginClickEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) (ffilter (==True) registerSuccessEvent)
+              e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack loginClickEvent)
+              userLoginResponseText :: Dynamic t T.Text <- holdDyn (T.pack "Log") $ fmap getBody e
+              let loginSuccessEvent  = fmap (getEventGivenUser . getBody) e -- Event t Bool
+              let getUserReqEvent = fmap (const getUserReq) (ffilter (==True) loginSuccessEvent)
+              getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
+              getText :: Dynamic t (Maybe User) <- holdDyn (Just (T.pack "nouser")) $ fmap (parseUserBody . getBody) getResponse -- Dynamic t (Maybe User)
+              let getTextSucceeded = ffilter isJust (updated getText)
+              dynText $ fmap (maybe "User response" id) getText -- Printing the username
+              let connectEvent = leftmost [fmap (const Login) getTextSucceeded, closeEvent]
+              return $ fmap swap $ attachPromptlyDyn getText connectEvent
 loginForm Login = elAttr "div" ("class" =: "modal") $ do
     elAttr "div" ("class" =: "modalDialog") $ do
         elClass "div" "pure-form" $ do
@@ -330,15 +343,19 @@ loginForm Login = elAttr "div" ("class" =: "modal") $ do
               dynText $ fmap (maybe "User response" id) getText -- Printing the username
               let connectEvent = leftmost [fmap (const Login) getTextSucceeded, closeEvent]
               return $ fmap swap $ attachPromptlyDyn getText connectEvent
+loginForm GoToSummary = do
+  return never
+loginForm GoToTyping = do
+  return never
+loginForm Logout = do
+  pb <- getPostBuild
+  ev <- performRequestAsync $ fmap (const logoutReq) pb
+  return $ fmap (const (Logout, Nothing)) ev
 
 parseUserBody :: T.Text -> Maybe User
 parseUserBody t
   | T.length t == 0 = Nothing
   | otherwise = Just t
--- loginForm GoToSummary = do
---   return (never, never)
--- loginForm GoToTyping = do
---   return (never, never)
 
 -- Todo:
 -- Login:
