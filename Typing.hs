@@ -3,10 +3,12 @@
 
 import Prelude hiding (mapM, mapM_, all, sequence)
 import Data.FileEmbed
+import Data.Tuple
 import qualified Data.ByteString as BS
 import Reflex
 import Reflex.Dom
 import Control.Monad
+import Control.Lens
 import Data.Map.Strict as Map
 import Reflex.Dom.Widget.Basic 
 import Data.Char (chr)
@@ -153,7 +155,7 @@ performArg f x = performEvent (fmap (IOClass.liftIO . f) x)
 charToNext ' ' = Next
 charToNext '\r' = Repeat
 
-getReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCredentials = True}
+getUserReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCredentials = True}
 getSummaries = xhrRequest "GET" "/snap/api/levels" def {_xhrRequestConfig_withCredentials = True}
 logoutReq = xhrRequest "GET" "/snap/logout" def {_xhrRequestConfig_withCredentials = True}
 
@@ -201,32 +203,37 @@ userCleaner x
 
 data ActiveTab = Typing | Summary deriving Show
 
-data ConnectType = Register | Login | Logout | CloseWindow | GoToTyping | GoToSummary deriving (Eq, Show)
+data ConnectType = Register | Login | Logout | CloseWindow | GoToTyping | GoToSummary | Failure deriving (Eq, Show)
 data DisplayState = DisplayState {
     userId :: Maybe T.Text,
     connectType :: ConnectType,
     open :: Bool,
     activeTab :: ActiveTab} deriving Show
 
-displayUpdateType (DisplayState _ _ _ _) Logout = startingDisplayState
-displayUpdateType (DisplayState _ _ _ _) CloseWindow = startingDisplayState
 displayUpdateType (DisplayState u t o a) t' = DisplayState u t' True a
-
 displayUpdateUser (DisplayState u t o a) u' = DisplayState u' t False a
+displayUpdateFromLoginForm t' u' st@(DisplayState u t o a)
+  | t'==Login || t'==Register = DisplayState u' t' False a
+  | t'==CloseWindow = DisplayState u t' False a
+  | t'==Logout = startingDisplayState
+  | t'==Failure = st
 
 startingDisplayState = DisplayState Nothing Register False Typing
 
 menuLink :: MonadWidget t m => T.Text -> m (Event t ())
 menuLink t = do
     (e, _) <- elClass (T.pack "li") (T.pack "pure-menu-item") $ do
-      elClass "div" "pure-menu-link" $ do
-        elAttr' "a" (Map.fromList [("class", "pure-menu-link")]) $ do
+      elClass' "div" "pure-menu-link" $ do
+        elAttr "a" (Map.fromList [("class", "pure-menu-link")]) $ do
           text t
     return $ domEvent Click e
 
+userGreeting :: Maybe User -> T.Text
+userGreeting Nothing = T.pack ""
+userGreeting (Just u) = T.concat [T.pack "Welcome, ", u, T.pack "!"]
 
-menu :: MonadWidget t m => [(T.Text, ConnectType)] -> m (Event t ConnectType)
-menu ls = do
+menu :: MonadWidget t m => [(T.Text, ConnectType)] -> Dynamic t (Maybe User) -> m (Event t ConnectType)
+menu ls user = do
     events :: [Event t ()] <- elClass (T.pack "div") (T.pack "pure-menu pure-menu-horizontal") $ do
       elClass (T.pack "ul") (T.pack "pure-menu-list") $ do  
         elClass "li" "pure-menu-heading" $ do
@@ -234,6 +241,7 @@ menu ls = do
         typingLink <- menuLink "Typing"
         summaryLink <- menuLink "Summary"
         ev <- mapM menuLink $ fmap fst ls
+        dynText $ fmap userGreeting user
         return $ [typingLink, summaryLink] ++ ev
     let connectEvents = [GoToTyping, GoToSummary] ++ fmap snd ls
     let menuEv = fmap (\(a, b) -> fmap (const b) a) $ zip events connectEvents
@@ -242,33 +250,36 @@ menu ls = do
 
 connect :: MonadWidget t m => DisplayState -> m (Event t DisplayState)
 connect st@(DisplayState user connectType open activeTab) = el (T.pack "div") $ do
-    menuEvent <- if isJust user
-      then menu [("logout", Logout)]
-      else menu [("login", Login), ("register", Register)]
-
-    ev <- performRequestAsync $ fmap (const logoutReq) $ (ffilter (\a -> a==Logout)) menuEvent
-      
-    (closeEvent, e) <- if open
+    loginFormEvent <- if open
         then do
-            (closeEvent, postReqEvent) <- loginForm connectType
-            e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack postReqEvent)
-            return (closeEvent, e)
+            e <- loginForm connectType
+            return e
         else do
-            return (never, never)
-    let getReqEvent = fmap (const getReq) e
-    getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
-    getText :: Dynamic t T.Text <- holdDyn (T.pack "") $ fmap getBody getResponse
-    dynText getText
-    let userEvent = updated $ fmap userCleaner getText
-    let connectEventUser = fmap (displayUpdateUser st) userEvent -- Event t DisplayState
-    let connectEventRegister = fmap (displayUpdateType st) $ leftmost [menuEvent, closeEvent] -- Event t ConnectEvent
-    let connectEvent = leftmost [connectEventUser, connectEventRegister]
-    return connectEvent
+            return never
+    let userEvent = fmap snd loginFormEvent
+    userDyn <- holdDyn Nothing userEvent
+
+    menuEvent <- if isJust user
+      then menu [("logout", Logout)] (constDyn user)
+      else menu [("login", Login), ("register", Register)] (constDyn user)
+    -- ev <- performRequestAsync $ fmap (const logoutReq) $ (ffilter (\a -> a==Logout)) menuEvent
+
+    let menuEventResult = fmap (displayUpdateType st) menuEvent
+    let loginFormResult = fmap (\(a, b) -> displayUpdateFromLoginForm a b st) loginFormEvent
+
+    return $ leftmost [loginFormResult, menuEventResult]
+    -- let getUserReqEvent = fmap (const getUserReq) e
+    -- getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
+    -- getText :: Dynamic t T.Text <- holdDyn (T.pack "") $ fmap getBody getResponse
+    -- dynText getText
+    -- let userEvent = updated $ fmap userCleaner getText
+    -- let connectEventUser = fmap (displayUpdateUser st) userEvent -- Event t DisplayState
+    -- let connectEventRegister = fmap (displayUpdateType st) $ leftmost [menuEvent, closeEvent] -- Event t ConnectEvent
+    -- let connectEvent = leftmost [connectEventUser, connectEventRegister]
+    -- return connectEvent
 
 type X = XhrRequest T.Text
 
--- Todo: Register endpoint should return "username exists" if it does.
--- In that case, stay at the register screen.
 pButton :: MonadWidget t m => T.Text -> m (Event t T.Text)
 pButton t = do
     (b, _) <- elClass' "button" "button pure-button" $ do
@@ -278,47 +289,77 @@ pButton t = do
 
 loginFields :: MonadWidget t m => m ((Dynamic t T.Text, Dynamic t T.Text, Event t T.Text, Event t ConnectType))
 loginFields = do
-    elAttr "div" ("class" =: "modalDialog") $ do
-        elClass "div" "pure-form" $ do
-            el "fieldset" $ do
-                name <- textInput $ def & attributes .~ constDyn (mconcat ["type" =: "email", "placeholder" =: "email"])
-                password <- textInput $ def & attributes .~ constDyn ("type" =: "password" <> "placeholder" =: "Password")
+                name <- textInput $ def & attributes .~ constDyn ("placeholder" =: "email")
+                let defPassword = set textInputConfig_inputType "password" def
+                password <- textInput $ defPassword & attributes .~ constDyn ("placeholder" =: "password")
                 b <- pButton "ok to login"
                 closeButton <- pButton "close window"
                 return ((_textInput_value name), (_textInput_value password), b, fmap (const CloseWindow) closeButton)
                 
-loginForm :: MonadWidget t m => ConnectType -> m ((Event t ConnectType, Event t X))
-loginForm Register = elAttr "div" ("class" =: "modal") $ do
-    (name, password, b, closeEvent) <- loginFields
-    let bothDyns = zipDynWith (,) name password
-    let reqString = fmap addInfo bothDyns
-    let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
-    let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
-    registerPostEvent :: Event t XhrResponse <- performRequestAsync registerPost
-    let registerLogin = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) registerPostEvent
-    return (closeEvent, registerLogin)
-loginForm Login = elAttr "div" ("class" =: "modal") $ do
-    (name, password, b, closeEvent) <- loginFields
-    let bothDyns = zipDynWith (,) name password
-    let reqString = fmap addInfo bothDyns
-    let loginEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
-    return (closeEvent, loginEvent)
-loginForm GoToSummary = do
-  return (never, never)
-loginForm GoToTyping = do
-  return (never, never)
+type User = T.Text
 
--- A widget to print the summaries.
--- Logic needed: If summaryEvent, then show it
--- Otherwise show main screen
+-- Event t (ConnectType, Maybe User)
+-- A loginform returns: What was clicked, and whether a user resulted from it.
+loginForm :: MonadWidget t m => ConnectType -> m (Event t (ConnectType, Maybe User))
+-- loginForm Register = elAttr "div" ("class" =: "modal") $ do
+--     (name, password, b, closeEvent) <- loginFields
+--     let bothDyns = zipDynWith (,) name password
+--     let reqString = fmap addInfo bothDyns
+--     let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
+--     let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
+--     registerPostEvent :: Event t XhrResponse <- performRequestAsync registerPost
+--     let registerLogin = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) registerPostEvent
+--     e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack registerLogin)
+--     return (closeEvent, e)
+loginForm Login = elAttr "div" ("class" =: "modal") $ do
+    elAttr "div" ("class" =: "modalDialog") $ do
+        elClass "div" "pure-form" $ do
+            el "fieldset" $ do
+              (name, password, b, closeEvent) <- loginFields
+              let bothDyns = zipDynWith (,) name password
+              let reqString = fmap addInfo bothDyns
+              let loginClickEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
+              e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack loginClickEvent)
+              userLoginResponseText :: Dynamic t T.Text <- holdDyn (T.pack "Log") $ fmap getBody e
+              dynText userLoginResponseText
+              let loginSuccessEvent  = fmap (getEventGivenUser . getBody) e -- Event t Bool
+              let getUserReqEvent = fmap (const getUserReq) (ffilter (==True) loginSuccessEvent)
+              getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
+              getText :: Dynamic t (Maybe User) <- holdDyn (Just (T.pack "nouser")) $ fmap (parseUserBody . getBody) getResponse -- Dynamic t (Maybe User)
+              let getTextSucceeded = ffilter isJust (updated getText)
+              dynText $ fmap (maybe "User response" id) getText -- Printing the username
+              let connectEvent = leftmost [fmap (const Login) getTextSucceeded, closeEvent]
+              return $ fmap swap $ attachPromptlyDyn getText connectEvent
+
+parseUserBody :: T.Text -> Maybe User
+parseUserBody t
+  | T.length t == 0 = Nothing
+  | otherwise = Just t
+-- loginForm GoToSummary = do
+--   return (never, never)
+-- loginForm GoToTyping = do
+--   return (never, never)
+
+-- Todo:
+-- Login:
+-- - validation for email
+-- - login:
+--   - wrong password
+--   - username does not exist
+-- - register: username already exists
+-- - remember user (note: loginUser arguments in Snap auth)
+-- https
+-- submit data using JSON
+
+getEventGivenUser x
+  | (T.length x) < 5 = True
+  | otherwise = False
 
 typingWidget :: MonadWidget t m => Dynamic t DisplayState -> Event t Char -> m ()
 typingWidget displayState allCharEvent = do
   let charEvent = ffilter ((flip elem) ['a'..'z']) allCharEvent
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
   divClass <- holdDyn (T.pack "half") (fmap (const (T.pack "")) charTransformer)
-  -- elDynAttr (T.pack "p") (fmap toHint divClass) $ text $ T.pack "Just type..."
-  dynText $ fmap (T.pack . show) displayState
 
   rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
       dyn $ fmap displayMainState currentState
@@ -352,13 +393,14 @@ typingWidget displayState allCharEvent = do
       dyn $ fmap (displayLevelSummary . levelSummary) currentState
 
       nextEv :: Event t (Event t NextEvent) <- dyn $ fmap nextButtons currentState
+      dynText $ fmap (T.pack . show) displayState
       dynText $ fmap (T.pack . show) currentState
   return ()
   -- void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ nextTransformer
 
 typing :: MonadWidget t m => m ()
 typing = do
-  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text "hiddne"
+  (keyListenerDiv, _) <- elAttr' (T.pack "div") hiddenDivAttr $ do text ""
   let allCharEvent = fmap chr $ domEvent Keypress keyListenerDiv -- Event t Char
 
   rec displayState :: Dynamic t DisplayState <- foldDyn ($) startingDisplayState $ mergeWith (.) [userTransformer]
@@ -369,8 +411,6 @@ typing = do
 
   let getReqEvent = fmap (const getSummaries) $ ffilter (\a -> connectType a == GoToSummary) connectEvent
   getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
-  received <- holdDyn "No" $ fmap (const "yes") getResponse
-  dynText received
   let summ = (fmap decodeXhrResponse getResponse) :: Event t (Maybe [LevelSummaryResponse])
   let sum2 = fmap (T.pack . (maybe "nothing" show)) summ -- Event t T.Text
   let lsr = fmap (maybe [] id) summ -- Event t [LevelSummaryResponse]
