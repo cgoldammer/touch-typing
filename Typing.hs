@@ -30,11 +30,9 @@ import GHC.Generics
 -- - validation for email address
 -- - remember user (note: loginUser arguments in Snap auth)
 -- https
--- clean up unsafePerformIO
 -- multiple tests (show choice buttons when test isn't started)
 -- submit data using JSON
 -- structure code into modules
--- use lenses for state
 
 data LetterType = Correct | Incorrect | ToEnter deriving (Eq, Show)
 type DisplayLetter = (Char, LetterType)
@@ -68,8 +66,10 @@ main = mainWidgetWithCss cssCombined typing
 
 cssCombined = BS.concat [$(embedFile "css/pure-min.css"), $(embedFile "css/grids-responsive-min.css"), $(embedFile "css/typing.css")]
 
-texts :: [String]
-texts = [take 10 $ randomRs ('a', 'z') $ unsafePerformIO newStdGen | i <- [0..]::[Int]]
+texts :: IO [String]
+texts = do 
+  std <- newStdGen
+  return [take 10 $ randomRs ('a', 'z') $ std | i <- [0..]::[Int]]
 
 correctPart :: String -> String -> [Bool]
 correctPart target [] = []
@@ -124,18 +124,29 @@ updateMainStateWithChar ms c = ms
         cts = ms^.currentTextState 
         ct = ms^.currentText
         
+nexter :: NextEvent -> MainState -> String -> MainState
+nexter Next ms nextText =  MainState nextCount nextText (initialDisplayString nextText) False t
+  where nextCount = ms^.currentTextNumber + 1
+        t = ms^.timeElapsed
+nexter Repeat ms  _ = MainState nextCount ct (initialDisplayString ct) False t
+  where nextCount = ms^.currentTextNumber + 1
+        ct = ms^.currentText
+        t = ms^.timeElapsed
 
-updateMainStateWithNext :: MainState -> NextEvent -> MainState
-updateMainStateWithNext (MainState ctn ct cts cp t) Next = MainState nextCount nextText (initialDisplayString nextText) False t
-  where nextCount = ctn + 1
-        nextText = texts !! nextCount
-updateMainStateWithNext (MainState ctn ct cts cp t) Repeat = MainState ctn ct (initialDisplayString ct) False t
+
+updateMainStateWithNext :: IO (NextEvent -> MainState -> MainState)
+updateMainStateWithNext = do
+  ts <- texts 
+  return $ \ne ms -> nexter ne ms (ts !! (ms^.currentTextNumber + 1))
 
 initialDisplayString :: String -> DisplayString
 initialDisplayString s = zip s (repeat ToEnter)
 
-startingMainState = MainState 0 newText (initialDisplayString newText) False 0
-  where newText = texts !! 0
+startingMainState :: IO MainState
+startingMainState = do 
+  ts <- texts
+  let newText = ts !! 0
+  return $ MainState 0 newText (initialDisplayString newText) False 0
 
 displayState :: MonadWidget t m => DisplayLetter -> m ()
 displayState (ch, ls) = elAttr (T.pack "span") ((T.pack "class") =: (stateCss ls)) $ do
@@ -382,13 +393,15 @@ typingWidget displayState allCharEvent = do
   let charEvent = ffilter ((flip elem) ['a'..'z']) allCharEvent
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
   divClass <- holdDyn (T.pack "half") (fmap (const (T.pack "")) charTransformer)
+  startingState :: MainState <- IOClass.liftIO startingMainState
 
-  rec currentState :: Dynamic t MainState <- foldDyn ($) startingMainState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
+  rec currentState :: Dynamic t MainState <- foldDyn ($) startingState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
       dyn $ fmap displayMainState currentState
       nextSimple :: Behavior t (Event t NextEvent) <- hold never nextEv
       let nextCharEvent = fmap charToNext $ ffilter (\a -> a==' ' || a=='\r') allCharEvent
       let nextEvent = leftmost [nextCharEvent, switch nextSimple]
-      let nextTransformer = fmap (flip updateMainStateWithNext) nextEvent
+      updaterWithNext :: NextEvent -> MainState -> MainState <- IOClass.liftIO updateMainStateWithNext
+      let nextTransformer = fmap updaterWithNext nextEvent
 
       let event = leftmost [fmap (const NewEntered) nextTransformer, fmap (const CharEntered) charTransformer] -- Event t EventType
       dIsFirst :: Dynamic t (Bool, Bool) <- foldDyn isFirstChar (True, False) event
