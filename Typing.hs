@@ -25,6 +25,41 @@ import Data.Monoid ((<>))
 import Data.Aeson
 import GHC.Generics
 
+-- Todo:
+-- Login:
+-- - validation for email address
+-- - remember user (note: loginUser arguments in Snap auth)
+-- https
+-- clean up unsafePerformIO
+-- multiple tests (show choice buttons when test isn't started)
+-- submit data using JSON
+-- structure code into modules
+-- use lenses for state
+
+data LetterType = Correct | Incorrect | ToEnter deriving (Eq, Show)
+type DisplayLetter = (Char, LetterType)
+type DisplayString = [DisplayLetter]
+
+data MainState = MainState
+  { _currentTextNumber :: Int
+  , _currentText :: String
+  , _currentTextState :: DisplayString
+  , _completed :: Bool 
+  , _timeElapsed :: Integer}
+  deriving Show
+makeLenses ''MainState
+
+data ActiveTab = Typing | Summary deriving Show
+data ConnectType = Register | Login | Logout | CloseWindow | GoToTyping | GoToSummary | Failure deriving (Eq, Show)
+data DisplayState = DisplayState {
+    _userId :: Maybe T.Text,
+    _connectType :: ConnectType,
+    _open :: Bool,
+    _activeTab :: ActiveTab} deriving Show
+makeLenses ''DisplayState
+
+data LevelSummaryResponse = LevelSummaryResponse {_time :: String, _textS :: String, _levelTimeS :: Int, _userIdS :: Int, _numberCorrectS :: Int, _idS :: Int, _levelIdS :: Int} deriving (Show)
+makeLenses ''LevelSummaryResponse
 
 default (T.Text)
 
@@ -41,9 +76,6 @@ correctPart target [] = []
 correctPart [] (entered:rest) = False : (correctPart [] rest)
 correctPart (a:as) (b:bs) = (a == b) : (correctPart as bs)
 
-data LetterType = Correct | Incorrect | ToEnter deriving (Eq, Show)
-type DisplayLetter = (Char, LetterType)
-type DisplayString = [DisplayLetter]
 
 correctToType :: Bool -> LetterType
 correctToType False = Incorrect
@@ -76,14 +108,6 @@ stateCss ToEnter = "to-enter"
 
 data NextEvent = Next | Repeat
 
-data MainState = MainState
-  { currentTextNumber :: Int
-  , currentText :: String
-  , currentTextState :: DisplayString
-  , completed :: Bool 
-  , timeElapsed :: Integer}
-  deriving Show
-
 numberLettersEntered :: DisplayString -> Int
 numberLettersEntered ds = maybe (length ds) id maybePosition
   where maybePosition = List.findIndex (==ToEnter) dt
@@ -91,17 +115,21 @@ numberLettersEntered ds = maybe (length ds) id maybePosition
 
 
 updateMainStateWithChar :: MainState -> Char -> MainState
-updateMainStateWithChar (MainState ctn ct cts cp t) c = MainState ctn ct (updateDisplayString cts c) completed t
-  where numberEntered = numberLettersEntered cts
-        completed = numberEntered >= (length ct) - 1
+updateMainStateWithChar ms c = ms
+                                & currentTextState .~ newTextState
+                                & completed .~ newCompleted
+  where newTextState = updateDisplayString cts c
+        numberEntered = numberLettersEntered cts
+        newCompleted = numberEntered >= (length ct) - 1
+        cts = ms^.currentTextState 
+        ct = ms^.currentText
+        
 
 updateMainStateWithNext :: MainState -> NextEvent -> MainState
 updateMainStateWithNext (MainState ctn ct cts cp t) Next = MainState nextCount nextText (initialDisplayString nextText) False t
   where nextCount = ctn + 1
         nextText = texts !! nextCount
 updateMainStateWithNext (MainState ctn ct cts cp t) Repeat = MainState ctn ct (initialDisplayString ct) False t
-
-updateMainStateWithClock (MainState ctn ct cts cp t) t2 = MainState ctn ct cts cp t2
 
 initialDisplayString :: String -> DisplayString
 initialDisplayString s = zip s (repeat ToEnter)
@@ -159,7 +187,6 @@ getUserReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_wit
 getSummaries = xhrRequest "GET" "/snap/api/levels" def {_xhrRequestConfig_withCredentials = True}
 logoutReq = xhrRequest "GET" "/snap/logout" def {_xhrRequestConfig_withCredentials = True}
 
-data LevelSummaryResponse = LevelSummaryResponse {time :: String, textS :: String, levelTimeS :: Int, userIdS :: Int, numberCorrectS :: Int, idS :: Int, levelIdS :: Int} deriving (Show)
 
 -- instance ToJSON LevelSummaryResponse
 instance FromJSON LevelSummaryResponse where
@@ -201,15 +228,6 @@ userCleaner x
   | x == T.pack "" = Nothing
   | otherwise = Just x
 
-data ActiveTab = Typing | Summary deriving Show
-
-data ConnectType = Register | Login | Logout | CloseWindow | GoToTyping | GoToSummary | Failure deriving (Eq, Show)
-data DisplayState = DisplayState {
-    userId :: Maybe T.Text,
-    connectType :: ConnectType,
-    open :: Bool,
-    activeTab :: ActiveTab} deriving Show
-
 displayUpdateType (DisplayState u t o a) t' = DisplayState u t' True a
 displayUpdateUser (DisplayState u t o a) u' = DisplayState u' t False a
 displayUpdateFromLoginForm t' u' st@(DisplayState u t o a)
@@ -249,10 +267,10 @@ menu ls user = do
         
 
 connect :: MonadWidget t m => DisplayState -> m (Event t DisplayState)
-connect st@(DisplayState user connectType open activeTab) = el (T.pack "div") $ do
+connect st@(DisplayState user ct open activeTab) = el (T.pack "div") $ do
     loginFormEvent <- if open
         then do
-            e <- loginForm connectType
+            e <- loginForm ct
             return e
         else do
             return never
@@ -310,20 +328,14 @@ loginForm Register = elAttr "div" ("class" =: "modal") $ do
               let reqStringButton = tagPromptlyDyn reqString b -- Event t Text 
               let registerPost = fmap (postForm (T.pack "/snap/register")) reqStringButton -- Event t XhrRequest
               e :: Event t XhrResponse <- performRequestAsync registerPost
-              userRegisterResponseText :: Dynamic t T.Text <- holdDyn (T.pack "Log") $ fmap getBody e
+              userRegisterResponseText :: Dynamic t T.Text <- holdDyn (T.pack "") $ fmap getBody e
               dynText userRegisterResponseText
               let registerSuccessEvent  = fmap (getEventGivenUser . getBody) e -- Event t Bool
               let loginClickEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) (ffilter (==True) registerSuccessEvent)
               e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack loginClickEvent)
               userLoginResponseText :: Dynamic t T.Text <- holdDyn (T.pack "Log") $ fmap getBody e
               let loginSuccessEvent  = fmap (getEventGivenUser . getBody) e -- Event t Bool
-              let getUserReqEvent = fmap (const getUserReq) (ffilter (==True) loginSuccessEvent)
-              getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
-              getText :: Dynamic t (Maybe User) <- holdDyn (Just (T.pack "nouser")) $ fmap (parseUserBody . getBody) getResponse -- Dynamic t (Maybe User)
-              let getTextSucceeded = ffilter isJust (updated getText)
-              dynText $ fmap (maybe "User response" id) getText -- Printing the username
-              let connectEvent = leftmost [fmap (const Login) getTextSucceeded, closeEvent]
-              return $ fmap swap $ attachPromptlyDyn getText connectEvent
+              afterLoginSuccess closeEvent loginSuccessEvent
 loginForm Login = elAttr "div" ("class" =: "modal") $ do
     elAttr "div" ("class" =: "modalDialog") $ do
         elClass "div" "pure-form" $ do
@@ -333,16 +345,10 @@ loginForm Login = elAttr "div" ("class" =: "modal") $ do
               let reqString = fmap addInfo bothDyns
               let loginClickEvent = tagPromptlyDyn (fmap (postForm (T.pack "/snap/login")) reqString) b
               e :: Event t XhrResponse <- performRequestAsync ((fmap . fmap) T.unpack loginClickEvent)
-              userLoginResponseText :: Dynamic t T.Text <- holdDyn (T.pack "Log") $ fmap getBody e
-              dynText userLoginResponseText
               let loginSuccessEvent  = fmap (getEventGivenUser . getBody) e -- Event t Bool
-              let getUserReqEvent = fmap (const getUserReq) (ffilter (==True) loginSuccessEvent)
-              getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
-              getText :: Dynamic t (Maybe User) <- holdDyn (Just (T.pack "nouser")) $ fmap (parseUserBody . getBody) getResponse -- Dynamic t (Maybe User)
-              let getTextSucceeded = ffilter isJust (updated getText)
-              dynText $ fmap (maybe "User response" id) getText -- Printing the username
-              let connectEvent = leftmost [fmap (const Login) getTextSucceeded, closeEvent]
-              return $ fmap swap $ attachPromptlyDyn getText connectEvent
+              userLoginResponseText :: Dynamic t T.Text <- holdDyn (T.pack "") $ fmap getBody e
+              dynText userLoginResponseText
+              afterLoginSuccess closeEvent loginSuccessEvent
 loginForm GoToSummary = do
   return never
 loginForm GoToTyping = do
@@ -352,21 +358,20 @@ loginForm Logout = do
   ev <- performRequestAsync $ fmap (const logoutReq) pb
   return $ fmap (const (Logout, Nothing)) ev
 
+afterLoginSuccess :: MonadWidget t m => Event t ConnectType -> Event t Bool -> m (Event t (ConnectType, Maybe User))
+afterLoginSuccess closeEvent loginSuccessEvent = do
+  let getUserReqEvent = fmap (const getUserReq) (ffilter (==True) loginSuccessEvent)
+  getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
+  getText :: Dynamic t (Maybe User) <- holdDyn (Just (T.pack "")) $ fmap (parseUserBody . getBody) getResponse -- Dynamic t (Maybe User)
+  let getTextSucceeded = ffilter isJust (updated getText)
+  let connectEvent = leftmost [fmap (const Login) getTextSucceeded, closeEvent]
+  return $ fmap swap $ attachPromptlyDyn getText connectEvent
+
+
 parseUserBody :: T.Text -> Maybe User
 parseUserBody t
   | T.length t == 0 = Nothing
   | otherwise = Just t
-
--- Todo:
--- Login:
--- - validation for email
--- - login:
---   - wrong password
---   - username does not exist
--- - register: username already exists
--- - remember user (note: loginUser arguments in Snap auth)
--- https
--- submit data using JSON
 
 getEventGivenUser x
   | (T.length x) < 5 = True
@@ -397,7 +402,7 @@ typingWidget displayState allCharEvent = do
       notLevelEnd :: Behavior t Bool <- hold False eHasNotCompleted
       let dynNew2 = dynNew notLevelEnd eHasStarted
       let d = postForm (T.pack "/snap/api/levels") -- T.Text -> XhRRequest
-      let sf ms = summary (currentText ms) ((numberCorrect . levelSummary) ms) (timeElapsed ms)
+      let sf ms = summary (ms^.currentText) ((numberCorrect . levelSummary) ms) (ms^.timeElapsed)
       let dLevelS = fmap (d . sf) currentState -- Dynamic t XhrRequest
       let lastCharTransformer = gate (current (fmap lastEntered currentState)) charTransformer
       let sendPost = tagPromptlyDyn dLevelS lastCharTransformer
@@ -406,7 +411,7 @@ typingWidget displayState allCharEvent = do
       dNew :: Dynamic t (m (Dynamic t Integer)) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
       clockTime :: Event t (Dynamic t Integer) <- dyn dNew
       dyndyn :: Dynamic t (Dynamic t Integer) <- holdDyn (constDyn 0) clockTime
-      let clockTransformer = fmap (flip updateMainStateWithClock) (updated (join dyndyn)) -- Event t (MainState -> MainState)
+      let clockTransformer = fmap (set timeElapsed) (updated (join dyndyn)) -- Event t (MainState -> MainState)
       dyn $ fmap (displayLevelSummary . levelSummary) currentState
 
       nextEv :: Event t (Event t NextEvent) <- dyn $ fmap nextButtons currentState
@@ -426,7 +431,7 @@ typing = do
       let connectEvent = switch w2 -- Event t DisplayState
       let userTransformer = fmap const connectEvent
 
-  let getReqEvent = fmap (const getSummaries) $ ffilter (\a -> connectType a == GoToSummary) connectEvent
+  let getReqEvent = fmap (const getSummaries) $ ffilter (\a -> a^.connectType == GoToSummary) connectEvent
   getResponse :: Event t XhrResponse <- performRequestAsync getReqEvent
   let summ = (fmap decodeXhrResponse getResponse) :: Event t (Maybe [LevelSummaryResponse])
   let sum2 = fmap (T.pack . (maybe "nothing" show)) summ -- Event t T.Text
@@ -434,7 +439,7 @@ typing = do
   lsrD <- holdDyn [] lsr -- Dynamic t [LevelSummaryResponse]
   let sl = fmap (displayLSRL . take 5) lsrD
   void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ userTransformer
-  let isSummary = fmap (\s -> connectType s == GoToSummary) displayState -- Dynamic t Bool
+  let isSummary = fmap (\s -> s^.connectType == GoToSummary) displayState -- Dynamic t Bool
   let ww = fmap (widg displayState allCharEvent sl) isSummary
   dyn ww
   return ()
@@ -477,16 +482,16 @@ cellHeader = cellType True
 displayLSR :: MonadWidget t m => LevelSummaryResponse -> m ()
 displayLSR lsr = do
   elClass "div" "pure-g" $ do
-    let text = textS lsr
-    let correct = numberCorrectS lsr
-    cell $ T.pack $ time lsr
+    let text = lsr^.textS
+    let correct = lsr^.numberCorrectS
+    cell $ T.pack $ lsr^.time
     cell $ T.pack text
-    cell $ T.pack $ show $ levelTimeS lsr
+    cell $ T.pack $ show $ lsr^.levelTimeS
     cell $ T.pack $ show correct
     cell $ T.pack $ show $ quot (correct * 100) (length text)
   return ()
 
-lastEntered ms = length (List.filter (==ToEnter) $ fmap snd $ currentTextState ms) == 1
+lastEntered ms = length (List.filter (==ToEnter) $ fmap snd $ _currentTextState ms) == 1
 
 summary :: String -> Int -> Integer -> T.Text
 summary t nc lt = T.pack $ "text=" ++ t ++ "&numberCorrect=" ++ (show nc) ++ "&levelTime=" ++ (show lt)
@@ -503,10 +508,10 @@ dynNew e hasStarted = do
 
 
 hasNotCompleted :: MainState -> a -> Bool
-hasNotCompleted ms _ = not $ completed ms
+hasNotCompleted ms _ = not $ _completed ms
 
 hasCompleted :: MainState -> a -> Bool
-hasCompleted ms _ = completed ms
+hasCompleted ms _ = _completed ms
 
 hasStarted :: (Bool, Bool) -> Bool
 hasStarted (_, True) = True
@@ -533,9 +538,9 @@ data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int, le
  
 levelSummary :: MainState -> LevelSummary
 levelSummary ms = LevelSummary numberLetters numberCorrect t
-  where numberLetters = length (currentText ms)
-        numberCorrect = length $ List.filter (==Correct) $ fmap snd (currentTextState ms)
-        t = timeElapsed ms
+  where numberLetters = length (_currentText ms)
+        numberCorrect = length $ List.filter (==Correct) $ fmap snd (_currentTextState ms)
+        t = _timeElapsed ms
 
 
 column :: MonadWidget t m => String -> String -> m ()
