@@ -30,20 +30,37 @@ import GHC.Generics
 -- - validation for email address
 -- - remember user (note: loginUser arguments in Snap auth)
 -- https
--- multiple tests (show choice buttons when test isn't started)
 -- submit data using JSON
 -- structure code into modules
+-- At beginning, show nextButtons without repeat
 
 data LetterType = Correct | Incorrect | ToEnter deriving (Eq, Show)
 type DisplayLetter = (Char, LetterType)
 type DisplayString = [DisplayLetter]
+
+data LetterGroup = LetterLower | LetterUpper | Numbers | Special deriving (Eq, Show)
+type LetterGroups = [LetterGroup]
+
+typeValues :: LetterGroup -> String
+typeValues LetterLower = ['a'..'z']
+typeValues LetterUpper = ['A'..'Z']
+typeValues Numbers = ['0'..'9']
+typeValues Special = "'~!@#$%^&*()_+-=[{]};:,.<>"
+
+typeName :: LetterGroup -> T.Text
+typeName LetterLower = "lowercase letters"
+typeName LetterUpper = "uppercase letters"
+typeName Numbers = "numbers"
+typeName Special = "special characters"
+
 
 data MainState = MainState
   { _currentTextNumber :: Int
   , _currentText :: String
   , _currentTextState :: DisplayString
   , _completed :: Bool 
-  , _timeElapsed :: Integer}
+  , _timeElapsed :: Integer
+  , _letterGroups :: [LetterGroup]}
   deriving Show
 makeLenses ''MainState
 
@@ -66,10 +83,16 @@ main = mainWidgetWithCss cssCombined typing
 
 cssCombined = BS.concat [$(embedFile "css/pure-min.css"), $(embedFile "css/grids-responsive-min.css"), $(embedFile "css/typing.css")]
 
-texts :: IO [String]
-texts = do 
-  std <- newStdGen
-  return [take 10 $ randomRs ('a', 'z') $ std | i <- [0..]::[Int]]
+
+allLetterGroups = [LetterLower, LetterUpper, Numbers, Special]
+allAcceptedLetters = concat $ fmap typeValues allLetterGroups
+
+texts :: Int -> [LetterGroup] -> String
+texts seed tt = take 10 [values !! ind | ind <- indices]
+  where values = concat $ fmap typeValues tt
+        std = mkStdGen seed
+        len = length values
+        indices = randomRs (0, len - 1) std
 
 correctPart :: String -> String -> [Bool]
 correctPart target [] = []
@@ -106,7 +129,7 @@ stateCss Correct = "correct"
 stateCss Incorrect = "incorrect"
 stateCss ToEnter = "to-enter"
 
-data NextEvent = Next | Repeat
+data NextEvent = Next [LetterGroup] | Repeat
 
 numberLettersEntered :: DisplayString -> Int
 numberLettersEntered ds = maybe (length ds) id maybePosition
@@ -124,29 +147,15 @@ updateMainStateWithChar ms c = ms
         cts = ms^.currentTextState 
         ct = ms^.currentText
         
-nexter :: NextEvent -> MainState -> String -> MainState
-nexter Next ms nextText =  MainState nextCount nextText (initialDisplayString nextText) False t
-  where nextCount = ms^.currentTextNumber + 1
-        t = ms^.timeElapsed
-nexter Repeat ms  _ = MainState nextCount ct (initialDisplayString ct) False t
-  where nextCount = ms^.currentTextNumber + 1
-        ct = ms^.currentText
-        t = ms^.timeElapsed
-
-
-updateMainStateWithNext :: IO (NextEvent -> MainState -> MainState)
-updateMainStateWithNext = do
-  ts <- texts 
-  return $ \ne ms -> nexter ne ms (ts !! (ms^.currentTextNumber + 1))
-
 initialDisplayString :: String -> DisplayString
 initialDisplayString s = zip s (repeat ToEnter)
 
 startingMainState :: IO MainState
 startingMainState = do 
-  ts <- texts
-  let newText = ts !! 0
-  return $ MainState 0 newText (initialDisplayString newText) False 0
+  std <- getStdGen
+  let startingSeed = fst $ random std
+  let newText = texts startingSeed [Numbers]
+  return $ MainState 0 newText (initialDisplayString newText) False 0 [Numbers]
 
 displayState :: MonadWidget t m => DisplayLetter -> m ()
 displayState (ch, ls) = elAttr (T.pack "span") ((T.pack "class") =: (stateCss ls)) $ do
@@ -156,16 +165,15 @@ displayState (ch, ls) = elAttr (T.pack "span") ((T.pack "class") =: (stateCss ls
 displayStates :: MonadWidget t m => String -> DisplayString -> m ()
 displayStates correct entered = sequence (fmap displayState (zip correct (fmap snd entered))) >> return ()
 
-displayMainStateBool :: MonadWidget t m => Bool -> MainState -> m ()
-displayMainStateBool True ms = displayMainState ms
-displayMainStateBool False _ = text "not showing"
-
-
 displayMainState :: MonadWidget t m => MainState -> m ()
-displayMainState (MainState ctn ct cts cp t) = do
-  elClass "div" "banner" $ do
-    elClass "h1" "banner-head" $ do displayStates ct cts
-  return ()
+displayMainState ms
+  | showingNext ms = do
+      return ()
+  | otherwise = do
+    elClass "div" "banner" $ do
+      elClass "h1" "banner-head" $ do
+        displayStates (ms^.currentText) (ms^.currentTextState)
+    return ()
 
 
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
@@ -173,26 +181,81 @@ hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "
 nextButton :: MonadWidget t m => T.Text -> m (Event t ())
 nextButton t = do
   next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
-    (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "next"
+    (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text t
     return $ domEvent Click b
   return next
 
-nextButtons :: MonadWidget t m => MainState -> m (Event t NextEvent)
-nextButtons (MainState ctn ct cts True _) = elClass "div" "l-content" $ do
-  (n, r) <- elClass "div" "next-tables pure-g" $ do
-    next <- nextButton "next"
-    repeat <- nextButton "repeat"
-    return (next, repeat)
-  return $ leftmost [fmap (const Next) n, fmap (const Repeat) r]
-nextButtons _ = do
-  blank
+letterGroupButton :: MonadWidget t m => (LetterGroup, Bool) -> m (Event t LetterGroup)
+letterGroupButton (tt, active) = do
+  let activationText = if active then " pure-button-active" else ""
+  let classText = T.concat [T.pack "pure-button", T.pack activationText]
+  (b, _) <- elAttr' "button" (Map.fromList [("class", classText)]) $ text $ typeName tt
+  return $ fmap (const tt) $ domEvent Click b
+
+buttonsFromList :: MonadWidget t m => [LetterGroup] -> m (Event t LetterGroup)
+buttonsFromList start = do
+  b <- elClass "div" "lettergroup" $ do
+    b <- mapM letterGroupButton $ [(tt, elem tt start) | tt <-  allLetterGroups ]
+    return b
+  return $ leftmost b
+
+letterGroupWidget :: MonadWidget t m => Dynamic t [LetterGroup] -> m (Event t ([LetterGroup] -> [LetterGroup]))
+letterGroupWidget start = do
+  let dynButtons = fmap buttonsFromList start -- Dynamic t (m (Event t LetterGroup))
+  showDyn :: Event t (Event t LetterGroup) <- dyn dynButtons
+  w2 :: Behavior t (Event t LetterGroup) <- hold never showDyn
+  let dynEvent = switch w2 -- Event t LetterGroup
+  return $ fmap negater dynEvent -- Event t ([LetterGroup] -> [LetterGroup])
+
+letterGroupDyn :: MonadWidget t m => [LetterGroup] -> m (Dynamic t [LetterGroup])
+letterGroupDyn tt = do
+  rec ttw :: Event t ([LetterGroup] -> [LetterGroup]) <- letterGroupWidget stateDyn
+      stateDyn :: Dynamic t [LetterGroup] <- foldDyn ($) tt ttw
+  return stateDyn
+
+negater :: LetterGroup -> [LetterGroup] -> [LetterGroup]
+negater e start = if elem e start then ffilter (/=e) start else start ++ [e]
+
+nextButtonsSet :: MonadWidget t m => Bool -> Bool -> m ((Event t (), Event t ()))
+nextButtonsSet _ True = do
+  next <- nextButton "next"
+  repeat <- nextButton "repeat"
+  return (next, repeat)
+nextButtonsSet True _ = do
+  next <- nextButton "Start"
+  return (next, never)
+nextButtonsSet _ _ = do
+  return (never, never)
+
+
+nextButtons :: MonadWidget t m => Event t Char -> (Bool, Bool, [LetterGroup]) -> m (Event t NextEvent)
+nextButtons _ (False, False, _) = do
   return never
+nextButtons allCharEvent (first, completed, tt) = elClass "div" "l-content" $ do
+  let nKey = ffilter (==' ') allCharEvent
+  let rKey = ffilter (=='\r') allCharEvent
+  (n, r) <- elClass "div" "next-tables pure-g" $ do
+    (nn, rr) <- nextButtonsSet first completed
+    return (nn, rr)
+  newTypes :: Dynamic t [LetterGroup] <- letterGroupDyn tt
+  elClass "div" "error" $ do
+    dynText $ fmap letterGroupError newTypes
+  let nEvent = leftmost [fmap (const Next) n, fmap (const Next) nKey]
+  let rEvent = leftmost [fmap (const Next) r, fmap (const Next) rKey]
+  let nextEvent = fmap Next $ tag (current newTypes) nEvent
+  let nextEventSuccess = gate (current (fmap ((>0) . length) newTypes)) nextEvent
+  return $ leftmost [nextEventSuccess, fmap (const Repeat) rEvent]
+
+letterGroupError :: [LetterGroup] -> T.Text
+letterGroupError lg
+  | length lg == 0 = T.pack "You need to select at least one field"
+  | otherwise = T.pack ""
 
 performArg :: MonadWidget t m => (b -> IO a) -> Event t b -> m (Event t a)
 performArg f x = performEvent (fmap (IOClass.liftIO . f) x)
 
-charToNext ' ' = Next
-charToNext '\r' = Repeat
+-- charToNext ' ' = Next
+-- charToNext '\r' = Repeat
 
 getUserReq = xhrRequest "GET" "/snap/api/levels/user" def {_xhrRequestConfig_withCredentials = True}
 getSummaries = xhrRequest "GET" "/snap/api/levels" def {_xhrRequestConfig_withCredentials = True}
@@ -231,8 +294,6 @@ postData contentType  url text =
 
 postForm :: T.Text -> T.Text -> XhrRequest T.Text
 postForm = postData "application/x-www-form-urlencoded"
-
-toHint a = fromList [((T.pack "class"), T.pack ("hint " ++ a))]
 
 userCleaner :: T.Text -> Maybe T.Text
 userCleaner x
@@ -296,15 +357,6 @@ connect st@(DisplayState user ct open activeTab) = el (T.pack "div") $ do
     let loginFormResult = fmap (\(a, b) -> displayUpdateFromLoginForm a b st) loginFormEvent
 
     return $ leftmost [loginFormResult, menuEventResult]
-    -- let getUserReqEvent = fmap (const getUserReq) e
-    -- getResponse :: Event t XhrResponse <- performRequestAsync getUserReqEvent
-    -- getText :: Dynamic t T.Text <- holdDyn (T.pack "") $ fmap getBody getResponse
-    -- dynText getText
-    -- let userEvent = updated $ fmap userCleaner getText
-    -- let connectEventUser = fmap (displayUpdateUser st) userEvent -- Event t DisplayState
-    -- let connectEventRegister = fmap (displayUpdateType st) $ leftmost [menuEvent, closeEvent] -- Event t ConnectEvent
-    -- let connectEvent = leftmost [connectEventUser, connectEventRegister]
-    -- return connectEvent
 
 type X = XhrRequest T.Text
 
@@ -388,20 +440,51 @@ getEventGivenUser x
   | (T.length x) < 5 = True
   | otherwise = False
 
+nexter :: NextEvent -> MainState -> ([LetterGroup] -> String) -> MainState
+nexter (Next tt) ms nextText = MainState nextCount nt initialDS False t tt
+  where nextCount = ms^.currentTextNumber + 1
+        t = ms^.timeElapsed
+        nt = nextText tt
+        initialDS = initialDisplayString nt
+nexter Repeat ms  _ = MainState nextCount ct initialDS False t (ms^.letterGroups)
+  where nextCount = ms^.currentTextNumber + 1
+        ct = ms^.currentText
+        t = ms^.timeElapsed
+        initialDS = initialDisplayString ct
+
+updateMainStateWithNext :: IO ((Int, NextEvent) -> MainState -> MainState)
+updateMainStateWithNext = do
+  std <- getStdGen
+  let startingSeed = fst $ random std
+  return $ \(i, ne) ms -> nexter ne ms (texts (startingSeed + i))
+
+veryFirstTime :: MainState -> Bool
+veryFirstTime ms = (ctn==0) && (ctsLength==toEnterLength)
+  where ctn = ms^.currentTextNumber
+        cts = ms^.currentTextState
+        toEnterLength = length $ ffilter (==ToEnter) $ fmap snd cts
+        ctsLength = length cts
+
+showingNext :: MainState -> Bool
+showingNext ms = (veryFirstTime ms) || (ms^.completed)
+
 typingWidget :: MonadWidget t m => Dynamic t DisplayState -> Event t Char -> m ()
 typingWidget displayState allCharEvent = do
-  let charEvent = ffilter ((flip elem) ['a'..'z']) allCharEvent
+  let charEvent = ffilter ((flip elem) allAcceptedLetters) allCharEvent
   let charTransformer = fmap (flip updateMainStateWithChar) charEvent
   divClass <- holdDyn (T.pack "half") (fmap (const (T.pack "")) charTransformer)
   startingState :: MainState <- IOClass.liftIO startingMainState
 
   rec currentState :: Dynamic t MainState <- foldDyn ($) startingState $ mergeWith (.) [charTransformer, nextTransformer, clockTransformer]
       dyn $ fmap displayMainState currentState
+      updaterWithNext :: (Int, NextEvent) -> MainState -> MainState <- IOClass.liftIO updateMainStateWithNext
+      let dynValues = fmap (\ms -> (veryFirstTime ms, ms^.completed, ms^.letterGroups)) currentState
+      nextEv :: Event t (Event t NextEvent) <- dyn $ fmap (nextButtons allCharEvent) dynValues
       nextSimple :: Behavior t (Event t NextEvent) <- hold never nextEv
-      let nextCharEvent = fmap charToNext $ ffilter (\a -> a==' ' || a=='\r') allCharEvent
-      let nextEvent = leftmost [nextCharEvent, switch nextSimple]
-      updaterWithNext :: NextEvent -> MainState -> MainState <- IOClass.liftIO updateMainStateWithNext
-      let nextTransformer = fmap updaterWithNext nextEvent
+      let nextEvent = switch nextSimple
+      let cNum = current (fmap (\a -> a^.currentTextNumber + 1) currentState)
+      let nextEventWithCount = attach cNum nextEvent -- Event t (Int, NextEvent)
+      let nextTransformer = fmap updaterWithNext nextEventWithCount
 
       let event = leftmost [fmap (const NewEntered) nextTransformer, fmap (const CharEntered) charTransformer] -- Event t EventType
       dIsFirst :: Dynamic t (Bool, Bool) <- foldDyn isFirstChar (True, False) event
@@ -417,7 +500,8 @@ typingWidget displayState allCharEvent = do
       let d = postForm (T.pack "/snap/api/levels") -- T.Text -> XhRRequest
       let sf ms = summary (ms^.currentText) ((numberCorrect . levelSummary) ms) (ms^.timeElapsed)
       let dLevelS = fmap (d . sf) currentState -- Dynamic t XhrRequest
-      let lastCharTransformer = gate (current (fmap lastEntered currentState)) charTransformer
+      let shouldSubmit ms = (lastEntered ms) && not (veryFirstTime ms)
+      let lastCharTransformer = gate (current (fmap shouldSubmit currentState)) charTransformer
       let sendPost = tagPromptlyDyn dLevelS lastCharTransformer
       registerPostEvent :: Event t XhrResponse <- performRequestAsync sendPost
 
@@ -426,8 +510,6 @@ typingWidget displayState allCharEvent = do
       dyndyn :: Dynamic t (Dynamic t Integer) <- holdDyn (constDyn 0) clockTime
       let clockTransformer = fmap (set timeElapsed) (updated (join dyndyn)) -- Event t (MainState -> MainState)
       dyn $ fmap (displayLevelSummary . levelSummary) currentState
-
-      nextEv :: Event t (Event t NextEvent) <- dyn $ fmap nextButtons currentState
       dynText $ fmap (T.pack . show) displayState
       dynText $ fmap (T.pack . show) currentState
   return ()
