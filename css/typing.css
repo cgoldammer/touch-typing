@@ -16,12 +16,48 @@ p {
     line-height: 1.6em;
 }
 
+.lettergroup {
+  max-width: 1200px;
+  margin: 0 auto;
+  margin-top: 50px;
+  font-size: 150%;
+  text-align: center;
+}
 
-/*
- * -- Layout Styles --
- */
 .l-content {
     margin: 0 auto;
+	margin-top: 150px;
+}
+
+.l-content-high {
+    margin: 0 auto;
+	margin-top: 50px;
+}
+
+.next-tables {
+	max-width: 500px;
+	margin: 0 auto;
+	text-align: center;
+}
+
+.button-next {
+	font-size: 300%;
+	border-radius: 10px;
+	background: #519251;
+	color: white;
+}
+
+input {
+    font-size: 200%;
+}
+
+.loginOkButtons {
+    font-size: 150%;
+    margin-top: 20px;
+}
+
+.loginOkButton {
+    margin: 10px
 }
 
 
@@ -51,21 +87,6 @@ p {
         font-weight: 500;
         text-shadow: 0 1px 1px black;
     }
-
-.next-tables {
-	margin-top: 50px;
-	max-width: 500px;
-	margin: 0 auto;
-	text-align: center;
-}
-
-.button-next {
-	font-size: 300%;
-	border-radius: 10px;
-	background: #519251;
-	color: white;
-
-}
 
 .small {
 	font-size: 100%;
@@ -158,11 +179,6 @@ p {
     color: gray;
 }
 
-.hint {
-  font-size: 200%;
-  text-align: center;
-}
-
 .half {
   opacity: 0.5;
 }
@@ -221,3 +237,13 @@ p {
     float: right;
 }
 
+.header{
+    font-weight: bold;
+}
+
+.error{
+    color: red;
+    text-align: center;
+}
+
+.

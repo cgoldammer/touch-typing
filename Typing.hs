@@ -88,7 +88,7 @@ allLetterGroups = [LetterLower, LetterUpper, Numbers, Special]
 allAcceptedLetters = concat $ fmap typeValues allLetterGroups
 
 texts :: Int -> [LetterGroup] -> String
-texts seed tt = take 10 [values !! ind | ind <- indices]
+texts seed tt = take 20 [values !! ind | ind <- indices]
   where values = concat $ fmap typeValues tt
         std = mkStdGen seed
         len = length values
@@ -178,13 +178,6 @@ displayMainState ms
 
 hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "1")]) 
 
-nextButton :: MonadWidget t m => T.Text -> m (Event t ())
-nextButton t = do
-  next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
-    (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text t
-    return $ domEvent Click b
-  return next
-
 letterGroupButton :: MonadWidget t m => (LetterGroup, Bool) -> m (Event t LetterGroup)
 letterGroupButton (tt, active) = do
   let activationText = if active then " pure-button-active" else ""
@@ -216,13 +209,26 @@ letterGroupDyn tt = do
 negater :: LetterGroup -> [LetterGroup] -> [LetterGroup]
 negater e start = if elem e start then ffilter (/=e) start else start ++ [e]
 
+nextButton :: MonadWidget t m => T.Text -> m (Event t ())
+nextButton t = do
+  next <- elClass "div" "pure-u-1 pure-u-md-1-2" $ do
+    (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text t
+    return $ domEvent Click b
+  return next
+
+
 nextButtonsSet :: MonadWidget t m => Bool -> Bool -> m ((Event t (), Event t ()))
 nextButtonsSet _ True = do
-  next <- nextButton "next"
-  repeat <- nextButton "repeat"
+  (next, repeat) <- elClass "div" "l-content-high" $ do
+    next <- nextButton "next"
+    repeat <- nextButton "repeat"
+    return (next, repeat)
   return (next, repeat)
 nextButtonsSet True _ = do
-  next <- nextButton "Start"
+  next <- elClass "div" "l-content" $ do
+    el "div" $ do
+      (b, _) <- elAttr' "button" (Map.fromList [("class", "pure-button button-next")]) $ text "Start"
+      return $ domEvent Click b
   return (next, never)
 nextButtonsSet _ _ = do
   return (never, never)
@@ -231,7 +237,7 @@ nextButtonsSet _ _ = do
 nextButtons :: MonadWidget t m => Event t Char -> (Bool, Bool, [LetterGroup]) -> m (Event t NextEvent)
 nextButtons _ (False, False, _) = do
   return never
-nextButtons allCharEvent (first, completed, tt) = elClass "div" "l-content" $ do
+nextButtons allCharEvent (first, completed, tt) = el "div" $ do
   let nKey = ffilter (==' ') allCharEvent
   let rKey = ffilter (=='\r') allCharEvent
   (n, r) <- elClass "div" "next-tables pure-g" $ do
@@ -362,7 +368,7 @@ type X = XhrRequest T.Text
 
 pButton :: MonadWidget t m => T.Text -> m (Event t T.Text)
 pButton t = do
-    (b, _) <- elClass' "button" "button pure-button" $ do
+    (b, _) <- elClass' "button" "button pure-button loginOkButton" $ do
         text t
     return $ fmap (const t) $ domEvent Click b
 
@@ -372,8 +378,10 @@ loginFields = do
                 name <- textInput $ def & attributes .~ constDyn ("placeholder" =: "email")
                 let defPassword = set textInputConfig_inputType "password" def
                 password <- textInput $ defPassword & attributes .~ constDyn ("placeholder" =: "password")
-                b <- pButton "ok to login"
-                closeButton <- pButton "close window"
+                (b, closeButton) <- elClass "div" "loginOkButtons" $ do
+                  b <- pButton "log in"
+                  closeButton <- pButton "close"
+                  return (b, closeButton)
                 return ((_textInput_value name), (_textInput_value password), b, fmap (const CloseWindow) closeButton)
                 
 type User = T.Text
@@ -383,7 +391,7 @@ type User = T.Text
 loginForm :: MonadWidget t m => ConnectType -> m (Event t (ConnectType, Maybe User))
 loginForm Register = elAttr "div" ("class" =: "modal") $ do
     elAttr "div" ("class" =: "modalDialog") $ do
-        elClass "div" "pure-form" $ do
+        elClass "div" "pure-form login" $ do
             el "fieldset" $ do
               (name, password, b, closeEvent) <- loginFields
               let bothDyns = zipDynWith (,) name password
@@ -401,7 +409,7 @@ loginForm Register = elAttr "div" ("class" =: "modal") $ do
               afterLoginSuccess closeEvent loginSuccessEvent
 loginForm Login = elAttr "div" ("class" =: "modal") $ do
     elAttr "div" ("class" =: "modalDialog") $ do
-        elClass "div" "pure-form" $ do
+        elClass "div" "pure-form login" $ do
             el "fieldset" $ do
               (name, password, b, closeEvent) <- loginFields
               let bothDyns = zipDynWith (,) name password
@@ -509,9 +517,9 @@ typingWidget displayState allCharEvent = do
       clockTime :: Event t (Dynamic t Integer) <- dyn dNew
       dyndyn :: Dynamic t (Dynamic t Integer) <- holdDyn (constDyn 0) clockTime
       let clockTransformer = fmap (set timeElapsed) (updated (join dyndyn)) -- Event t (MainState -> MainState)
-      dyn $ fmap (displayLevelSummary . levelSummary) currentState
-      dynText $ fmap (T.pack . show) displayState
-      dynText $ fmap (T.pack . show) currentState
+      dyn $ fmap (\ms -> displayLevelSummary (not (veryFirstTime ms), levelSummary ms)) currentState
+      -- dynText $ fmap (T.pack . show) displayState
+      -- dynText $ fmap (T.pack . show) currentState
   return ()
   -- void $ performArg (const $ Element.focus (_element_raw keyListenerDiv)) $ nextTransformer
 
@@ -644,13 +652,18 @@ column name value = elClass (T.pack "div") (T.pack "pure-u-1 pure-u-md-1-3") $ d
         el (T.pack "h2") $ text (T.pack name)
         elClass (T.pack "span") (T.pack "typing-table-type") $ do text (T.pack value)
 
-displayLevelSummary :: MonadWidget t m => LevelSummary -> m ()
-displayLevelSummary ls = elClass (T.pack "div") (T.pack "l-content") $ do
-  elClass (T.pack "div") (T.pack "typing-tables pure-g") $ do
-    column "Time" $ (show (levelTime ls)) ++ "s"
-    column "Letters" $ show (numberLetters ls)
-    column "Correct" $ show (numberCorrect ls)
-  return ()
+displayLevelSummary :: MonadWidget t m => (Bool, LevelSummary) -> m ()
+displayLevelSummary (doShow, ls)
+  | not doShow = do
+                  return ()
+  | otherwise = do
+      elClass (T.pack "div") (T.pack "l-content") $ do
+        elClass (T.pack "div") (T.pack "typing-tables pure-g") $ do
+          column "Time" $ (show (levelTime ls)) ++ "s"
+          column "Letters" $ show (numberLetters ls)
+          column "Correct" $ show (numberCorrect ls)
+        return ()
+
 
 aSecond :: NominalDiffTime
 aSecond = 1
