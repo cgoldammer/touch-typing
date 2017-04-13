@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <script language="javascript" src="rts.js"></script>
+    <script language="javascript" src="lib.js"></script>
+    <script language="javascript" src="out.js"></script>
+    <script>
+	    function setFocus(){ 
+			others = document.getElementsByClassName("modalDialog");
+			if (others.length == 0){
+				document.getElementById("h").focus();
+			}
+		}
+    </script>
+  </head>
+  <body onload="window.setInterval(setFocus, 1000)">
+  </body>
+  <script language="javascript" src="runmain.js" defer></script>
+
+
+</html>
