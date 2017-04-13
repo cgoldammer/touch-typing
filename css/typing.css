@@ -43,7 +43,7 @@ p {
 .button-next {
 	font-size: 300%;
 	border-radius: 10px;
-	background: #519251;
+	background: #9999ff;
 	color: white;
 }
 
@@ -246,4 +246,6 @@ input {
     text-align: center;
 }
 
-.
+.type-active{
+    background-color: #e6ffe6;
+}

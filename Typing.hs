@@ -16,6 +16,7 @@ import qualified Data.List as List
 import qualified GHCJS.DOM.Element as Element
 import qualified Control.Monad.IO.Class as IOClass
 import Data.Time.Clock
+import Data.Time
 import System.Random
 import System.IO.Unsafe
 import qualified Data.Text as T
@@ -24,6 +25,7 @@ import GHCJS.DOM.Element hiding (drop)
 import Data.Monoid ((<>))
 import Data.Aeson
 import GHC.Generics
+import System.Locale
 
 -- Todo:
 -- Login:
@@ -33,6 +35,12 @@ import GHC.Generics
 -- submit data using JSON
 -- structure code into modules
 -- At beginning, show nextButtons without repeat
+-- clean up table
+-- use regression to quantify improvement:
+-- regress both share correct and time on characteristics of text
+-- So for each level I have relativeSC and relativeT
+-- Create average of both: 15pp above average (87th percentile), 20% above average (66th percentile)
+
 
 data LetterType = Correct | Incorrect | ToEnter deriving (Eq, Show)
 type DisplayLetter = (Char, LetterType)
@@ -59,7 +67,7 @@ data MainState = MainState
   , _currentText :: String
   , _currentTextState :: DisplayString
   , _completed :: Bool 
-  , _timeElapsed :: Integer
+  , _timeElapsed :: Int
   , _letterGroups :: [LetterGroup]}
   deriving Show
 makeLenses ''MainState
@@ -73,7 +81,7 @@ data DisplayState = DisplayState {
     _activeTab :: ActiveTab} deriving Show
 makeLenses ''DisplayState
 
-data LevelSummaryResponse = LevelSummaryResponse {_time :: String, _textS :: String, _levelTimeS :: Int, _userIdS :: Int, _numberCorrectS :: Int, _idS :: Int, _levelIdS :: Int} deriving (Show)
+data LevelSummaryResponse = LevelSummaryResponse {_time :: UTCTime, _textS :: String, _levelTimeS :: Int, _userIdS :: Int, _numberCorrectS :: Int, _idS :: Int, _levelIdS :: Int} deriving (Show)
 makeLenses ''LevelSummaryResponse
 
 default (T.Text)
@@ -154,8 +162,8 @@ startingMainState :: IO MainState
 startingMainState = do 
   std <- getStdGen
   let startingSeed = fst $ random std
-  let newText = texts startingSeed [Numbers]
-  return $ MainState 0 newText (initialDisplayString newText) False 0 [Numbers]
+  let newText = texts startingSeed [LetterLower]
+  return $ MainState 0 newText (initialDisplayString newText) False 0 [LetterLower]
 
 displayState :: MonadWidget t m => DisplayLetter -> m ()
 displayState (ch, ls) = elAttr (T.pack "span") ((T.pack "class") =: (stateCss ls)) $ do
@@ -180,7 +188,7 @@ hiddenDivAttr = (Map.fromList [("id", "h"), ("class", "overlay"), ("tabindex", "
 
 letterGroupButton :: MonadWidget t m => (LetterGroup, Bool) -> m (Event t LetterGroup)
 letterGroupButton (tt, active) = do
-  let activationText = if active then " pure-button-active" else ""
+  let activationText = if active then " pure-button-active type-active" else ""
   let classText = T.concat [T.pack "pure-button", T.pack activationText]
   (b, _) <- elAttr' "button" (Map.fromList [("class", classText)]) $ text $ typeName tt
   return $ fmap (const tt) $ domEvent Click b
@@ -511,12 +519,13 @@ typingWidget displayState allCharEvent = do
       let shouldSubmit ms = (lastEntered ms) && not (veryFirstTime ms)
       let lastCharTransformer = gate (current (fmap shouldSubmit currentState)) charTransformer
       let sendPost = tagPromptlyDyn dLevelS lastCharTransformer
-      registerPostEvent :: Event t XhrResponse <- performRequestAsync sendPost
+      performRequestAsync sendPost
 
       dNew :: Dynamic t (m (Dynamic t Integer)) <- foldDyn (\a b -> dynNew2) dynNew2 eIsFirst
       clockTime :: Event t (Dynamic t Integer) <- dyn dNew
       dyndyn :: Dynamic t (Dynamic t Integer) <- holdDyn (constDyn 0) clockTime
-      let clockTransformer = fmap (set timeElapsed) (updated (join dyndyn)) -- Event t (MainState -> MainState)
+      let dynTime = join dyndyn
+      let clockTransformer = fmap (set timeElapsed) (updated (fmap fromIntegral dynTime))
       dyn $ fmap (\ms -> displayLevelSummary (not (veryFirstTime ms), levelSummary ms)) currentState
       -- dynText $ fmap (T.pack . show) displayState
       -- dynText $ fmap (T.pack . show) currentState
@@ -562,7 +571,7 @@ displayLSRD dslr = do
 
 displayLSRL :: MonadWidget t m => [LevelSummaryResponse] -> m ()
 displayLSRL dslr = do
-  let fields = ["time", "level text", "time in seconds", "number correct", "share correct"]
+  let fields = ["time", "level text", "letters", "time in seconds", "number correct", "share correct"]
   elClass "div" "pure-g" $ do
     mapM (cellHeader . T.pack) fields
   mapM displayLSR dslr
@@ -572,7 +581,7 @@ displayLSRL dslr = do
 cellType :: MonadWidget t m => Bool -> T.Text -> m ()
 cellType header val = do 
   let s = if header then "header" else "cell"
-  elClass "div" (T.pack ("pure-u-1-5 " ++ s)) $ do
+  elClass "div" (T.pack ("pure-u-4-24 " ++ s)) $ do
     text val
   return ()
 
@@ -582,32 +591,34 @@ cell = cellType False
 cellHeader :: MonadWidget t m => T.Text -> m ()
 cellHeader = cellType True
 
+
 displayLSR :: MonadWidget t m => LevelSummaryResponse -> m ()
 displayLSR lsr = do
   elClass "div" "pure-g" $ do
     let text = lsr^.textS
     let correct = lsr^.numberCorrectS
-    cell $ T.pack $ lsr^.time
+    cell $ T.pack $ formatTime Data.Time.defaultTimeLocale "%Y-%m-%d %-l:%M%p" (lsr^.time)
     cell $ T.pack text
-    cell $ T.pack $ show $ lsr^.levelTimeS
+    cell $ T.pack $ show $ length text
+    cell $ T.pack $ show $ timeShow $ lsr^.levelTimeS
     cell $ T.pack $ show correct
     cell $ T.pack $ show $ quot (correct * 100) (length text)
   return ()
 
 lastEntered ms = length (List.filter (==ToEnter) $ fmap snd $ _currentTextState ms) == 1
 
-summary :: String -> Int -> Integer -> T.Text
+summary :: String -> Int -> Int -> T.Text
 summary t nc lt = T.pack $ "text=" ++ t ++ "&numberCorrect=" ++ (show nc) ++ "&levelTime=" ++ (show lt)
 
 dynNew :: MonadWidget t m => Behavior t Bool -> Event t Bool -> m (Dynamic t Integer)
 dynNew e hasStarted = do
   curTime <- IOClass.liftIO getCurrentTime
   tl :: Dynamic t TickInfo <- clockLossy aSecond curTime
-  let tlTime = fmap (\a -> a + 1) $ fmap (_tickInfo_n) (updated tl) -- Event t Integer
-  let tlTimeGated = gate e tlTime -- Event t Integer
+  let tlTime = fmap (\a -> a + 1) $ fmap (_tickInfo_n) (updated tl) -- Event t Int
+  let tlTimeGated = gate e tlTime -- Event t Int
   let tlTime2 = leftmost [fmap (const 0) hasStarted, tlTimeGated]
   clock :: Dynamic t Integer <- holdDyn 0 tlTime2
-  return $ clock
+  return clock
 
 
 hasNotCompleted :: MainState -> a -> Bool
@@ -627,17 +638,7 @@ isFirstChar CharEntered (True, _) = (False, True)
 isFirstChar NewEntered (_, _) = (True, False)
 isFirstChar CharEntered (_, _) = (False, False)
 
-newLevel :: MonadWidget t m => Event t a -> m ()
-newLevel e = do
-  curTime <- IOClass.liftIO getCurrentTime
-  tl :: Event t TickInfo <- tickLossyFrom aSecond curTime e
-  let tlTime = fmap (show . _tickInfo_n) tl -- Event t String
-  clock :: Dynamic t String <- holdDyn "0" tlTime
-  dynText (fmap T.pack clock)
-  return ()
-
-
-data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int, levelTime :: Integer}
+data LevelSummary = LevelSummary {numberLetters :: Int, numberCorrect :: Int, levelTime :: Int}
  
 levelSummary :: MainState -> LevelSummary
 levelSummary ms = LevelSummary numberLetters numberCorrect t
@@ -659,14 +660,16 @@ displayLevelSummary (doShow, ls)
   | otherwise = do
       elClass (T.pack "div") (T.pack "l-content") $ do
         elClass (T.pack "div") (T.pack "typing-tables pure-g") $ do
-          column "Time" $ (show (levelTime ls)) ++ "s"
+          column "Time" $ (show (timeShow (levelTime ls))) ++ "s"
           column "Letters" $ show (numberLetters ls)
           column "Correct" $ show (numberCorrect ls)
         return ()
 
+timeShow :: Int -> Double
+timeShow ls = fromIntegral ls / 10
 
 aSecond :: NominalDiffTime
-aSecond = 1
+aSecond = 0.1
 
 type Count = Map.Map Char Int
 
